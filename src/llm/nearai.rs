@@ -280,7 +280,6 @@ impl NearAiProvider {
         let token = self.session.get_token().await?;
 
         tracing::debug!("Sending request to NEAR AI: {}", url);
-        tracing::debug!("Request body: {:?}", body);
 
         let response = self
             .client
@@ -298,8 +297,11 @@ impl NearAiProvider {
         let status = response.status();
         let response_text = response.text().await.unwrap_or_default();
 
-        tracing::debug!("NEAR AI response status: {}", status);
-        tracing::debug!("NEAR AI response body: {}", response_text);
+        tracing::debug!(
+            "NEAR AI response: status={} body_len={}",
+            status,
+            response_text.len()
+        );
 
         if !status.is_success() {
             // Check for session expiration (401 with specific message patterns)
@@ -456,7 +458,7 @@ impl LlmProvider for NearAiProvider {
             Err(e) => return Err(e),
         };
 
-        tracing::debug!("NEAR AI response: {:?}", response);
+        tracing::debug!("NEAR AI response: output_items={}", response.output.len());
 
         // Extract text from response output
         // Try multiple formats since API response shape may vary
@@ -464,11 +466,6 @@ impl LlmProvider for NearAiProvider {
             .output
             .iter()
             .filter_map(|item| {
-                tracing::debug!(
-                    "Processing output item: type={}, text={:?}",
-                    item.item_type,
-                    item.text
-                );
                 if item.item_type == "message" {
                     // First check for direct text field on item
                     if let Some(ref text) = item.text {
@@ -479,11 +476,6 @@ impl LlmProvider for NearAiProvider {
                         contents
                             .iter()
                             .filter_map(|c| {
-                                tracing::debug!(
-                                    "Content item: type={}, text={:?}",
-                                    c.content_type,
-                                    c.text
-                                );
                                 // Accept various content types that might contain text
                                 match c.content_type.as_str() {
                                     "output_text" | "text" => c.text.clone(),

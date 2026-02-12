@@ -194,10 +194,19 @@ impl near::agent::host::Host for StoreData {
             .scan_http_request(&url, &header_vec, body.as_deref())
             .map_err(|e| format!("Potential secret leak blocked: {}", e))?;
 
-        // Make HTTP request using blocking I/O.
-        // We're inside a spawn_blocking context, so use block_on.
-        let result = tokio::runtime::Handle::current().block_on(async {
-            let client = reqwest::Client::new();
+        // Make HTTP request using a dedicated single-threaded runtime.
+        // We're inside spawn_blocking, so we can't rely on the main runtime's
+        // I/O driver (it may be busy with WASM compilation or other startup work).
+        // A dedicated runtime gives us our own I/O driver and avoids contention.
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map_err(|e| format!("Failed to create HTTP runtime: {e}"))?;
+        let result = rt.block_on(async {
+            let client = reqwest::Client::builder()
+                .connect_timeout(Duration::from_secs(10))
+                .build()
+                .map_err(|e| format!("Failed to build HTTP client: {e}"))?;
 
             let mut request = match method.to_uppercase().as_str() {
                 "GET" => client.get(&url),

@@ -84,7 +84,9 @@ async fn main() -> anyhow::Result<()> {
 
             // Memory commands need database (and optionally embeddings)
             let _ = dotenvy::dotenv();
-            let config = Config::from_env().await.map_err(|e| anyhow::anyhow!("{}", e))?;
+            let config = Config::from_env()
+                .await
+                .map_err(|e| anyhow::anyhow!("{}", e))?;
             let store = ironclaw::history::Store::new(&config.database).await?;
             store.run_migrations().await?;
 
@@ -279,7 +281,7 @@ async fn main() -> anyhow::Result<()> {
 
     // Initialize tracing
     let env_filter = EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| EnvFilter::new("ironclaw=info,tower_http=debug"));
+        .unwrap_or_else(|_| EnvFilter::new("ironclaw=info,tower_http=warn"));
 
     // Create log broadcaster before tracing init so the WebLogLayer can capture all events.
     // This gets wired to the gateway's /api/logs/events SSE endpoint later.

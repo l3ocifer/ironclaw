@@ -850,6 +850,91 @@ async fn combine_provider_scopes(
     combined
 }
 
+/// HTML landing page shown in the browser after an OAuth redirect.
+fn oauth_landing_html(provider_name: &str, success: bool) -> String {
+    let (icon, heading, subtitle, accent) = if success {
+        (
+            r##"<div style="width:64px;height:64px;border-radius:50%;background:#22c55e;display:flex;align-items:center;justify-content:center;margin:0 auto 24px">
+                <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
+              </div>"##,
+            format!("{} Connected", provider_name),
+            "You can close this window and return to your terminal.",
+            "#22c55e",
+        )
+    } else {
+        (
+            r##"<div style="width:64px;height:64px;border-radius:50%;background:#ef4444;display:flex;align-items:center;justify-content:center;margin:0 auto 24px">
+                <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+              </div>"##,
+            "Authorization Failed".to_string(),
+            "The request was denied. You can close this window and try again.",
+            "#ef4444",
+        )
+    };
+
+    format!(
+        r#"<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>IronClaw - {heading}</title>
+<style>
+  * {{ margin:0; padding:0; box-sizing:border-box }}
+  body {{
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    background: #0a0a0a;
+    color: #e5e5e5;
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    min-height: 100vh;
+  }}
+  .card {{
+    text-align: center;
+    padding: 48px 40px;
+    max-width: 420px;
+    border: 1px solid #262626;
+    border-radius: 16px;
+    background: #141414;
+  }}
+  h1 {{
+    font-size: 22px;
+    font-weight: 600;
+    margin-bottom: 8px;
+    color: #fafafa;
+  }}
+  p {{
+    font-size: 14px;
+    color: #a3a3a3;
+    line-height: 1.5;
+  }}
+  .accent {{ color: {accent}; }}
+  .brand {{
+    margin-top: 32px;
+    font-size: 12px;
+    color: #525252;
+    letter-spacing: 0.5px;
+    text-transform: uppercase;
+  }}
+</style>
+</head>
+<body>
+  <div class="card">
+    {icon}
+    <h1>{heading}</h1>
+    <p>{subtitle}</p>
+    <div class="brand">IronClaw</div>
+  </div>
+</body>
+</html>"#,
+        heading = heading,
+        icon = icon,
+        subtitle = subtitle,
+        accent = accent,
+    )
+}
+
 /// OAuth browser-based login flow.
 async fn auth_tool_oauth(
     store: &PostgresSecretsStore,
@@ -901,23 +986,20 @@ async fn auth_tool_oauth(
     println!("  Starting OAuth authentication...");
     println!();
 
-    // Find an available port for the callback
-    let mut listener = None;
-    let mut port = 0;
-
-    for p in 9876..=9886 {
-        match TcpListener::bind(format!("127.0.0.1:{}", p)).await {
-            Ok(l) => {
-                listener = Some(l);
-                port = p;
-                break;
-            }
-            Err(_) => continue,
-        }
-    }
-
-    let listener = listener.ok_or_else(|| anyhow::anyhow!("Could not find available port"))?;
-    let redirect_uri = format!("http://localhost:{}/callback", port);
+    // Bind the OAuth callback listener on a fixed port.
+    // The matching redirect URI (http://localhost:9876/callback) must be registered
+    // in the provider's OAuth app configuration.
+    const OAUTH_CALLBACK_PORT: u16 = 9876;
+    let listener = TcpListener::bind(format!("127.0.0.1:{}", OAUTH_CALLBACK_PORT))
+        .await
+        .map_err(|e| {
+            anyhow::anyhow!(
+                "Port {} is in use (another auth flow running?): {}",
+                OAUTH_CALLBACK_PORT,
+                e
+            )
+        })?;
+    let redirect_uri = format!("http://localhost:{}/callback", OAUTH_CALLBACK_PORT);
 
     // Generate PKCE verifier and challenge
     let (code_verifier, code_challenge) = if oauth.use_pkce {
@@ -1000,16 +1082,10 @@ async fn auth_tool_oauth(
                                 // Send success response
                                 let response = format!(
                                     "HTTP/1.1 200 OK\r\n\
-                                     Content-Type: text/html\r\n\
+                                     Content-Type: text/html; charset=utf-8\r\n\
                                      \r\n\
-                                     <!DOCTYPE html><html><body style=\"font-family: sans-serif; \
-                                     display: flex; justify-content: center; align-items: center; \
-                                     height: 100vh; margin: 0; background: #191919; color: white;\">\
-                                     <div style=\"text-align: center;\">\
-                                     <h1>✓ {} Connected!</h1>\
-                                     <p>You can close this window.</p>\
-                                     </div></body></html>",
-                                    display_name
+                                     {}",
+                                    oauth_landing_html(display_name, true)
                                 );
                                 let _ = socket.write_all(response.as_bytes()).await;
                                 let _ = socket.shutdown().await;
@@ -1020,8 +1096,13 @@ async fn auth_tool_oauth(
 
                         // Check for error
                         if query.contains("error=") {
-                            let response =
-                                "HTTP/1.1 400 Bad Request\r\n\r\nAuthorization denied";
+                            let response = format!(
+                                "HTTP/1.1 400 Bad Request\r\n\
+                                 Content-Type: text/html; charset=utf-8\r\n\
+                                 \r\n\
+                                 {}",
+                                oauth_landing_html(display_name, false)
+                            );
                             let _ = socket.write_all(response.as_bytes()).await;
                             return Err(anyhow::anyhow!("Authorization denied by user"));
                         }

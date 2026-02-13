@@ -302,8 +302,9 @@ impl near::agent::channel_host::Host for ChannelStoreData {
                 request = request.body(body_bytes);
             }
 
-            // Send request with caller-specified timeout (default 30s).
-            let timeout = std::time::Duration::from_millis(timeout_ms.unwrap_or(30_000) as u64);
+            // Send request with caller-specified timeout (default 30s, max 5min).
+            let timeout_ms = timeout_ms.unwrap_or(30_000).min(300_000) as u64;
+            let timeout = std::time::Duration::from_millis(timeout_ms);
             let response = request.timeout(timeout).send().await.map_err(|e| {
                 // Walk the full error chain so we get the actual root cause
                 // (DNS, TLS, connection refused, etc.) instead of just

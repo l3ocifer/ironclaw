@@ -38,7 +38,14 @@ pub(crate) fn truncate_for_preview(output: &str, max_chars: usize) -> String {
         .collect::<Vec<_>>()
         .join(" ");
     if collapsed.len() > max_chars {
-        format!("{}...", &collapsed[..max_chars])
+        // Truncate on a char boundary to avoid panicking on multi-byte UTF-8
+        let boundary = collapsed
+            .char_indices()
+            .map(|(i, _)| i)
+            .take_while(|&i| i <= max_chars)
+            .last()
+            .unwrap_or(0);
+        format!("{}...", &collapsed[..boundary])
     } else {
         collapsed
     }

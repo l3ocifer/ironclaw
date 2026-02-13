@@ -98,7 +98,7 @@ impl McpServerConfig {
         // Remote HTTPS servers need auth handling (DCR, token refresh, 401 detection).
         // Localhost/127.0.0.1 servers are assumed to be dev servers without auth.
         let url_lower = self.url.to_lowercase();
-        let is_localhost = url_lower.contains("localhost") || url_lower.contains("127.0.0.1");
+        let is_localhost = is_localhost_url(&url_lower);
         url_lower.starts_with("https://") && !is_localhost
     }
 
@@ -417,10 +417,47 @@ pub async fn remove_mcp_server_db(
     Ok(())
 }
 
+/// Check if a lowercased URL points to localhost or 127.0.0.1.
+///
+/// Parses the host from the URL authority to avoid substring false positives
+/// like "notlocalhost.com" matching "localhost".
+fn is_localhost_url(url_lower: &str) -> bool {
+    // Extract the authority: everything between "://" and the next "/" or end.
+    let after_scheme = url_lower
+        .find("://")
+        .map(|i| &url_lower[i + 3..])
+        .unwrap_or(url_lower);
+    let authority_end = after_scheme.find('/').unwrap_or(after_scheme.len());
+    let authority = &after_scheme[..authority_end];
+    // Strip optional userinfo (user:pass@host)
+    let host_port = authority
+        .rfind('@')
+        .map(|i| &authority[i + 1..])
+        .unwrap_or(authority);
+    // Strip port (:8080)
+    let host = host_port
+        .rfind(':')
+        .map(|i| &host_port[..i])
+        .unwrap_or(host_port);
+    host == "localhost" || host == "127.0.0.1"
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use tempfile::tempdir;
+
+    #[test]
+    fn test_is_localhost_url() {
+        assert!(is_localhost_url("http://localhost:3000/path"));
+        assert!(is_localhost_url("https://localhost/path"));
+        assert!(is_localhost_url("http://127.0.0.1:8080"));
+        assert!(is_localhost_url("http://127.0.0.1"));
+        assert!(!is_localhost_url("https://notlocalhost.com/path"));
+        assert!(!is_localhost_url("https://example-localhost.io"));
+        assert!(!is_localhost_url("https://mcp.notion.com"));
+        assert!(is_localhost_url("http://user:pass@localhost:3000/path"));
+    }
 
     #[test]
     fn test_server_config_validation() {

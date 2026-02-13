@@ -186,8 +186,14 @@ impl StoreData {
                 headers.insert(key.clone(), value.clone());
             }
 
-            // Append query parameters to URL
+            // Append query parameters to URL (insert before fragment if present)
             if !cred.query_params.is_empty() {
+                let (base, fragment) = match url.find('#') {
+                    Some(i) => (url[..i].to_string(), Some(url[i..].to_string())),
+                    None => (url.clone(), None),
+                };
+                *url = base;
+
                 let separator = if url.contains('?') { '&' } else { '?' };
                 for (i, (name, value)) in cred.query_params.iter().enumerate() {
                     if i == 0 {
@@ -198,6 +204,10 @@ impl StoreData {
                     url.push_str(&urlencoding::encode(name));
                     url.push('=');
                     url.push_str(&urlencoding::encode(value));
+                }
+
+                if let Some(frag) = fragment {
+                    url.push_str(&frag);
                 }
             }
         }
@@ -325,8 +335,9 @@ impl near::agent::host::Host for StoreData {
                 request = request.body(body_bytes);
             }
 
-            // Caller-specified timeout (default 30s)
-            let timeout = Duration::from_millis(timeout_ms.unwrap_or(30_000) as u64);
+            // Caller-specified timeout (default 30s, max 5min)
+            let timeout_ms = timeout_ms.unwrap_or(30_000).min(300_000) as u64;
+            let timeout = Duration::from_millis(timeout_ms);
             let response = request.timeout(timeout).send().await.map_err(|e| {
                 // Walk the full error chain for the actual root cause
                 let mut chain = format!("HTTP request failed: {}", e);
@@ -908,6 +919,7 @@ async fn resolve_host_credentials(
 /// Extract the hostname from a URL string.
 ///
 /// Handles `https://host:port/path`, stripping scheme, port, and path.
+/// Also handles IPv6 bracket notation like `http://[::1]:8080/path`.
 /// Returns None for malformed URLs.
 fn extract_host_from_url(url: &str) -> Option<String> {
     let after_scheme = url
@@ -917,14 +929,21 @@ fn extract_host_from_url(url: &str) -> Option<String> {
         .find(['/', '?', '#'])
         .unwrap_or(after_scheme.len());
     let host_port = &after_scheme[..end];
-    // Strip userinfo (user:pass@host) and port (:443)
-    let host = host_port
-        .rsplit('@')
-        .next()
-        .unwrap_or(host_port)
-        .split(':')
-        .next()
+    // Strip userinfo (user:pass@host)
+    let after_userinfo = host_port
+        .rfind('@')
+        .map(|i| &host_port[i + 1..])
         .unwrap_or(host_port);
+    // Handle IPv6 bracket notation: [::1]:port -> ::1
+    if after_userinfo.starts_with('[') {
+        let closing = after_userinfo.find(']')?;
+        return Some(after_userinfo[1..closing].to_string());
+    }
+    // Regular host:port -> host
+    let host = after_userinfo
+        .rfind(':')
+        .map(|i| &after_userinfo[..i])
+        .unwrap_or(after_userinfo);
     Some(host.to_string())
 }
 
@@ -977,6 +996,15 @@ mod tests {
         );
         assert_eq!(extract_host_from_url("ftp://bad.com"), None);
         assert_eq!(extract_host_from_url("not a url"), None);
+        // IPv6
+        assert_eq!(
+            extract_host_from_url("http://[::1]:8080/test"),
+            Some("::1".to_string())
+        );
+        assert_eq!(
+            extract_host_from_url("https://[2001:db8::1]/path"),
+            Some("2001:db8::1".to_string())
+        );
     }
 
     #[test]

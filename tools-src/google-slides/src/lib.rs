@@ -107,8 +107,7 @@ impl exports::near::agent::tool::Guest for GoogleSlidesTool {
                 },
                 "insertion_index": {
                     "type": "integer",
-                    "description": "Position to insert at (0-based). Used by: create_slide (omit to append), insert_text (default: 0)",
-                    "default": 0
+                    "description": "Position to insert at (0-based). Used by: create_slide (omit to append at end), insert_text (default: 0)"
                 },
                 "layout": {
                     "type": "string",

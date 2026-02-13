@@ -94,8 +94,7 @@ impl exports::near::agent::tool::Guest for GoogleDocsTool {
                 },
                 "index": {
                     "type": "integer",
-                    "description": "Character index (1 for start of body, -1 to append at end). Used by: insert_text (default: -1), insert_table",
-                    "default": -1
+                    "description": "Character index (1 for start of body, -1 to append at end). Required for: insert_table. Used by: insert_text (default: -1)"
                 },
                 "segment_id": {
                     "type": "string",

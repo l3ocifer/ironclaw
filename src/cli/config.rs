@@ -46,8 +46,6 @@ pub enum ConfigCommand {
 /// Connects to the database to read/write settings. Falls back to disk
 /// if the database is not available.
 pub async fn run_config_command(cmd: ConfigCommand) -> anyhow::Result<()> {
-    let _ = dotenvy::dotenv();
-
     // Try to connect to the DB for settings access
     let store = match connect_store().await {
         Ok(s) => Some(s),
@@ -195,8 +193,8 @@ fn show_path(has_db: bool) -> anyhow::Result<()> {
         println!("Settings stored in: PostgreSQL (not connected, using defaults)");
     }
     println!(
-        "Bootstrap config:   {}",
-        crate::bootstrap::BootstrapConfig::default_path().display()
+        "Env config:         {}",
+        crate::bootstrap::ironclaw_env_path().display()
     );
 
     Ok(())

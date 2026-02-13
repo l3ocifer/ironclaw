@@ -43,6 +43,11 @@ use ironclaw::{
 async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
+    // Load env vars early: ~/.ironclaw/.env first (for DATABASE_URL), then .env in cwd.
+    // dotenvy never overwrites, so explicit env vars > cwd .env > ~/.ironclaw/.env.
+    ironclaw::bootstrap::load_ironclaw_env();
+    let _ = dotenvy::dotenv();
+
     // Handle non-agent commands first (they don't need full setup)
     match &cli.command {
         Some(Command::Tool(tool_cmd)) => {
@@ -83,7 +88,6 @@ async fn main() -> anyhow::Result<()> {
                 .init();
 
             // Memory commands need database (and optionally embeddings)
-            let _ = dotenvy::dotenv();
             let config = Config::from_env()
                 .await
                 .map_err(|e| anyhow::anyhow!("{}", e))?;
@@ -130,7 +134,6 @@ async fn main() -> anyhow::Result<()> {
             return run_memory_command(mem_cmd.clone(), store.pool(), embeddings).await;
         }
         Some(Command::Status) => {
-            let _ = dotenvy::dotenv();
             tracing_subscriber::fmt()
                 .with_env_filter(
                     EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("warn")),
@@ -220,9 +223,6 @@ async fn main() -> anyhow::Result<()> {
             skip_auth,
             channels_only,
         }) => {
-            // Load .env before running onboarding wizard
-            let _ = dotenvy::dotenv();
-
             let config = SetupConfig {
                 skip_auth: *skip_auth,
                 channels_only: *channels_only,
@@ -236,9 +236,6 @@ async fn main() -> anyhow::Result<()> {
         }
     }
 
-    // Load .env if present
-    let _ = dotenvy::dotenv();
-
     // Enhanced first-run detection
     if !cli.no_onboard {
         if let Some(reason) = check_onboard_needed().await {
@@ -246,13 +243,14 @@ async fn main() -> anyhow::Result<()> {
             println!();
             let mut wizard = SetupWizard::new();
             wizard.run().await?;
+
+            // Wizard just wrote ~/.ironclaw/.env with DATABASE_URL.
+            // Reload it so Config::from_env() below can find it.
+            ironclaw::bootstrap::load_ironclaw_env();
         }
     }
 
-    // Load bootstrap config (4 fields that must live on disk)
-    let bootstrap = ironclaw::bootstrap::BootstrapConfig::load();
-
-    // Load initial config from env + disk (before DB is available)
+    // Load initial config from env (before DB is available)
     let mut config = match Config::from_env().await {
         Ok(c) => c,
         Err(ironclaw::error::ConfigError::MissingRequired { key, hint }) => {
@@ -320,7 +318,7 @@ async fn main() -> anyhow::Result<()> {
 
         // Reload config from DB now that we have a connection.
         // Priority: env var > DB setting > default.
-        match Config::from_db(&store, "default", &bootstrap).await {
+        match Config::from_db(&store, "default").await {
             Ok(db_config) => {
                 config = db_config;
                 tracing::info!("Configuration reloaded from database");
@@ -1047,25 +1045,14 @@ async fn main() -> anyhow::Result<()> {
 ///
 /// Returns `Some(reason)` if onboarding should be triggered, `None` otherwise.
 async fn check_onboard_needed() -> Option<&'static str> {
-    let bootstrap = ironclaw::bootstrap::BootstrapConfig::load();
-
-    // Database not configured (and not in env)
-    if bootstrap.database_url.is_none() && std::env::var("DATABASE_URL").is_err() {
+    // DATABASE_URL not set means we can't connect to anything
+    if std::env::var("DATABASE_URL").is_err() {
         return Some("Database not configured");
     }
 
-    // Secrets not configured (and not in env)
-    if bootstrap.secrets_master_key_source == ironclaw::settings::KeySource::None
-        && std::env::var("SECRETS_MASTER_KEY").is_err()
-        && !ironclaw::secrets::keychain::has_master_key().await
-    {
-        // Only require secrets setup if user hasn't explicitly disabled it
-        // For now, we don't require it for first run
-    }
-
-    // First run (onboarding never completed and no session)
+    // No session file means auth hasn't been set up
     let session_path = ironclaw::llm::session::default_session_path();
-    if !bootstrap.onboard_completed && !session_path.exists() {
+    if !session_path.exists() {
         return Some("First run");
     }
 

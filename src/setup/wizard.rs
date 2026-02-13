@@ -774,7 +774,7 @@ impl SetupWizard {
         Ok(())
     }
 
-    /// Save settings to the database and bootstrap.json, then print summary.
+    /// Save settings to the database and `~/.ironclaw/.env`, then print summary.
     async fn save_and_summarize(&mut self) -> Result<(), SetupError> {
         self.settings.onboard_completed = true;
 
@@ -794,19 +794,15 @@ impl SetupWizard {
             ));
         }
 
-        // Write bootstrap.json (the 4 pre-DB fields that must live on disk)
-        let bootstrap = crate::bootstrap::BootstrapConfig {
-            database_url: self.settings.database_url.clone(),
-            database_pool_size: self.settings.database_pool_size,
-            secrets_master_key_source: self.settings.secrets_master_key_source,
-            onboard_completed: true,
-        };
-        bootstrap.save().map_err(|e| {
-            SetupError::Io(std::io::Error::new(
-                std::io::ErrorKind::Other,
-                format!("Failed to save bootstrap.json: {}", e),
-            ))
-        })?;
+        // Write DATABASE_URL to ~/.ironclaw/.env
+        if let Some(ref url) = self.settings.database_url {
+            crate::bootstrap::save_database_url(url).map_err(|e| {
+                SetupError::Io(std::io::Error::new(
+                    std::io::ErrorKind::Other,
+                    format!("Failed to save .env: {}", e),
+                ))
+            })?;
+        }
 
         println!();
         print_success("Configuration saved to database");

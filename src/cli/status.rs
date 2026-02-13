@@ -5,11 +5,13 @@
 
 use std::path::PathBuf;
 
+use crate::bootstrap::BootstrapConfig;
 use crate::settings::Settings;
 
 /// Run the status command, printing system health info.
 pub async fn run_status_command() -> anyhow::Result<()> {
-    let settings = Settings::load();
+    let bootstrap = BootstrapConfig::load();
+    let settings = Settings::default();
 
     println!("IronClaw Status");
     println!("===============\n");
@@ -22,7 +24,7 @@ pub async fn run_status_command() -> anyhow::Result<()> {
     );
 
     // Database
-    let db_url_set = settings.database_url.is_some() || std::env::var("DATABASE_URL").is_ok();
+    let db_url_set = bootstrap.database_url.is_some() || std::env::var("DATABASE_URL").is_ok();
     print!("  Database:    ");
     if db_url_set {
         // Try to connect
@@ -45,11 +47,12 @@ pub async fn run_status_command() -> anyhow::Result<()> {
 
     // Secrets
     print!("  Secrets:     ");
-    let secrets_configured = settings.secrets_master_key_source != crate::settings::KeySource::None
+    let secrets_configured = bootstrap.secrets_master_key_source
+        != crate::settings::KeySource::None
         || std::env::var("SECRETS_MASTER_KEY").is_ok()
         || crate::secrets::keychain::has_master_key().await;
     if secrets_configured {
-        println!("configured ({:?})", settings.secrets_master_key_source);
+        println!("configured ({:?})", bootstrap.secrets_master_key_source);
     } else {
         println!("not configured");
     }
@@ -130,17 +133,20 @@ pub async fn run_status_command() -> anyhow::Result<()> {
     }
 
     // Settings path
-    println!("\n  Settings:    {}", Settings::default_path().display());
+    println!(
+        "\n  Bootstrap:   {}",
+        BootstrapConfig::default_path().display()
+    );
 
     Ok(())
 }
 
 async fn check_database() -> anyhow::Result<()> {
     let _ = dotenvy::dotenv();
-    let settings = Settings::load();
+    let bootstrap = BootstrapConfig::load();
     let url = std::env::var("DATABASE_URL")
         .ok()
-        .or(settings.database_url)
+        .or(bootstrap.database_url)
         .ok_or_else(|| anyhow::anyhow!("no URL"))?;
 
     let config: deadpool_postgres::Config = deadpool_postgres::Config {

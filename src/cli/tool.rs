@@ -777,8 +777,8 @@ async fn auth_tool(name: String, dir: Option<PathBuf>, user_id: String) -> anyho
                     }
                 }
 
-                // Save the token
-                save_token(&secrets_store, &user_id, &auth, &token).await?;
+                // Save the token (env var path: no refresh token or expiry)
+                save_token(&secrets_store, &user_id, &auth, &token, None, None).await?;
                 print_success(display_name);
                 return Ok(());
             }
@@ -1013,8 +1013,19 @@ async fn auth_tool_oauth(
             )
         })?;
 
-    // Save the token
-    save_token(store, user_id, auth, access_token).await?;
+    let refresh_token = token_data.get("refresh_token").and_then(|v| v.as_str());
+    let expires_in = token_data.get("expires_in").and_then(|v| v.as_u64());
+
+    // Save the token (with refresh token and expiry if provided)
+    save_token(
+        store,
+        user_id,
+        auth,
+        access_token,
+        refresh_token,
+        expires_in,
+    )
+    .await?;
 
     // Extract any additional info for display
     let workspace_name = token_data
@@ -1116,8 +1127,8 @@ async fn auth_tool_manual(
         }
     }
 
-    // Save the token
-    save_token(store, user_id, auth, &token).await?;
+    // Save the token (manual path: no refresh token or expiry)
+    save_token(store, user_id, auth, &token, None, None).await?;
     print_success(display_name);
     Ok(())
 }
@@ -1208,11 +1219,16 @@ async fn validate_token(
 }
 
 /// Save token to secrets store.
+///
+/// Optionally stores a refresh token (as `{secret_name}_refresh_token`) and
+/// sets `expires_at` on the access token so the runtime can auto-refresh.
 async fn save_token(
     store: &PostgresSecretsStore,
     user_id: &str,
     auth: &crate::tools::wasm::AuthCapabilitySchema,
     token: &str,
+    refresh_token: Option<&str>,
+    expires_in: Option<u64>,
 ) -> anyhow::Result<()> {
     let mut params = CreateSecretParams::new(&auth.secret_name, token);
 
@@ -1220,10 +1236,28 @@ async fn save_token(
         params = params.with_provider(provider);
     }
 
+    if let Some(secs) = expires_in {
+        let expires_at = chrono::Utc::now() + chrono::Duration::seconds(secs as i64);
+        params = params.with_expiry(expires_at);
+    }
+
     store
         .create(user_id, params)
         .await
         .map_err(|e| anyhow::anyhow!("Failed to save token: {}", e))?;
+
+    // Store refresh token separately (no expiry, it's long-lived)
+    if let Some(rt) = refresh_token {
+        let refresh_name = format!("{}_refresh_token", auth.secret_name);
+        let mut refresh_params = CreateSecretParams::new(&refresh_name, rt);
+        if let Some(ref provider) = auth.provider {
+            refresh_params = refresh_params.with_provider(provider);
+        }
+        store
+            .create(user_id, refresh_params)
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to save refresh token: {}", e))?;
+    }
 
     Ok(())
 }

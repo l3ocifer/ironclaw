@@ -460,7 +460,10 @@ async fn main() -> anyhow::Result<()> {
     // Both register into the shared ToolRegistry (RwLock-based) so concurrent writes are safe.
     let wasm_tools_future = async {
         if let Some(ref runtime) = wasm_tool_runtime {
-            let loader = WasmToolLoader::new(Arc::clone(runtime), Arc::clone(&tools));
+            let mut loader = WasmToolLoader::new(Arc::clone(runtime), Arc::clone(&tools));
+            if let Some(ref secrets) = secrets_store {
+                loader = loader.with_secrets_store(Arc::clone(secrets));
+            }
 
             // Load installed tools from ~/.ironclaw/tools/
             match loader.load_from_dir(&config.wasm.tools_dir).await {

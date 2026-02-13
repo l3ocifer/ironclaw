@@ -115,14 +115,13 @@ impl BootstrapConfig {
     }
 }
 
-/// One-time migration from disk config files to the database settings table.
+/// One-time migration of legacy `~/.ironclaw/settings.json` into the database.
 ///
-/// On first boot after upgrade, checks if:
-/// 1. `~/.ironclaw/settings.json` exists
-/// 2. The DB settings table is empty for this user
+/// Only runs when a `settings.json` exists on disk AND the DB has no settings
+/// yet. After the wizard writes directly to the DB, this path is only hit by
+/// users upgrading from the old disk-only configuration.
 ///
-/// If both conditions hold, migrates settings, MCP servers, and session data
-/// to the database, writes `bootstrap.json`, and renames old files to `.migrated`.
+/// After syncing, renames `settings.json` to `.migrated` so it won't trigger again.
 pub async fn migrate_disk_to_db(
     store: &crate::history::Store,
     user_id: &str,
@@ -133,15 +132,14 @@ pub async fn migrate_disk_to_db(
         return Ok(());
     }
 
-    // Only migrate if DB is empty for this user
+    // If DB already has settings, this is not a first boot, the wizard already
+    // wrote directly to the DB. Just clean up the stale file.
     let has_settings = store.has_settings(user_id).await.map_err(|e| {
         MigrationError::Database(format!("Failed to check existing settings: {}", e))
     })?;
     if has_settings {
-        tracing::debug!(
-            "DB already has settings for user '{}', skipping migration",
-            user_id
-        );
+        tracing::info!("DB already has settings, renaming stale settings.json");
+        rename_to_migrated(&legacy_settings_path);
         return Ok(());
     }
 

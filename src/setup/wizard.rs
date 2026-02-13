@@ -77,7 +77,7 @@ impl SetupWizard {
     pub fn new() -> Self {
         Self {
             config: SetupConfig::default(),
-            settings: Settings::load(),
+            settings: Settings::default(),
             session_manager: None,
             db_pool: None,
             secrets_crypto: None,
@@ -88,7 +88,7 @@ impl SetupWizard {
     pub fn with_config(config: SetupConfig) -> Self {
         Self {
             config,
-            settings: Settings::load(),
+            settings: Settings::default(),
             session_manager: None,
             db_pool: None,
             secrets_crypto: None,
@@ -146,7 +146,7 @@ impl SetupWizard {
         }
 
         // Save settings and print summary
-        self.save_and_summarize()?;
+        self.save_and_summarize().await?;
 
         Ok(())
     }
@@ -572,7 +572,7 @@ impl SetupWizard {
     /// Step 6: Channel configuration.
     async fn step_channels(&mut self) -> Result<(), SetupError> {
         // First, configure tunnel (shared across all channels that need webhooks)
-        match setup_tunnel() {
+        match setup_tunnel(&self.settings) {
             Ok(Some(url)) => {
                 self.settings.tunnel.public_url = Some(url);
             }
@@ -689,8 +689,9 @@ impl SetupWizard {
                             .await
                             .map_err(SetupError::Channel)?
                     } else if channel_name == "telegram" {
-                        let telegram_result =
-                            setup_telegram(ctx).await.map_err(SetupError::Channel)?;
+                        let telegram_result = setup_telegram(ctx, &self.settings)
+                            .await
+                            .map_err(SetupError::Channel)?;
                         if let Some(owner_id) = telegram_result.owner_id {
                             self.settings.channels.telegram_owner_id = Some(owner_id);
                         }
@@ -773,19 +774,42 @@ impl SetupWizard {
         Ok(())
     }
 
-    /// Save settings and print summary.
-    fn save_and_summarize(&mut self) -> Result<(), SetupError> {
+    /// Save settings to the database and bootstrap.json, then print summary.
+    async fn save_and_summarize(&mut self) -> Result<(), SetupError> {
         self.settings.onboard_completed = true;
 
-        self.settings.save().map_err(|e| {
+        // Write all settings to the database
+        if let Some(ref pool) = self.db_pool {
+            let store = crate::history::Store::from_pool(pool.clone());
+            let db_map = self.settings.to_db_map();
+            store
+                .set_all_settings("default", &db_map)
+                .await
+                .map_err(|e| {
+                    SetupError::Database(format!("Failed to save settings to database: {}", e))
+                })?;
+        } else {
+            return Err(SetupError::Database(
+                "No database connection, cannot save settings".to_string(),
+            ));
+        }
+
+        // Write bootstrap.json (the 4 pre-DB fields that must live on disk)
+        let bootstrap = crate::bootstrap::BootstrapConfig {
+            database_url: self.settings.database_url.clone(),
+            database_pool_size: self.settings.database_pool_size,
+            secrets_master_key_source: self.settings.secrets_master_key_source,
+            onboard_completed: true,
+        };
+        bootstrap.save().map_err(|e| {
             SetupError::Io(std::io::Error::new(
                 std::io::ErrorKind::Other,
-                format!("Failed to save settings: {}", e),
+                format!("Failed to save bootstrap.json: {}", e),
             ))
         })?;
 
         println!();
-        print_success("Configuration saved to ~/.ironclaw/");
+        print_success("Configuration saved to database");
         println!();
 
         // Print summary

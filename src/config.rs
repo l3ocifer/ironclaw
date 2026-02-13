@@ -60,11 +60,11 @@ impl Config {
     ///
     /// Used during early startup before the database is connected,
     /// and by CLI commands that don't have DB access.
-    /// Falls back to legacy `settings.json` on disk if present.
+    /// Uses defaults for all settings; the DB overwrites them via `from_db()`.
     pub async fn from_env() -> Result<Self, ConfigError> {
         let _ = dotenvy::dotenv();
         let bootstrap = crate::bootstrap::BootstrapConfig::load();
-        let settings = Settings::load();
+        let settings = Settings::default();
         Self::build(&bootstrap, &settings).await
     }
 

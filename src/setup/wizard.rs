@@ -455,6 +455,7 @@ impl SetupWizard {
             .unwrap_or_else(|_| "https://private.near.ai".to_string());
 
         let config = LlmConfig {
+            backend: crate::config::LlmBackend::NearAi,
             nearai: crate::config::NearAiConfig {
                 model: "dummy".to_string(),
                 base_url,
@@ -463,6 +464,10 @@ impl SetupWizard {
                 api_mode: crate::config::NearAiApiMode::Responses,
                 api_key: None,
             },
+            openai: None,
+            anthropic: None,
+            ollama: None,
+            openai_compatible: None,
         };
 
         match create_llm_provider(&config, Arc::clone(session)) {
@@ -797,10 +802,10 @@ impl SetupWizard {
         // Write DATABASE_URL to ~/.ironclaw/.env
         if let Some(ref url) = self.settings.database_url {
             crate::bootstrap::save_database_url(url).map_err(|e| {
-                SetupError::Io(std::io::Error::new(
-                    std::io::ErrorKind::Other,
-                    format!("Failed to save .env: {}", e),
-                ))
+                SetupError::Io(std::io::Error::other(format!(
+                    "Failed to save .env: {}",
+                    e
+                )))
             })?;
         }
 

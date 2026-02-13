@@ -17,7 +17,8 @@ use ironclaw::{
         web::log_layer::{LogBroadcaster, WebLogLayer},
     },
     cli::{
-        Cli, Command, run_mcp_command, run_memory_command, run_status_command, run_tool_command,
+        Cli, Command, run_mcp_command, run_memory_command, run_pairing_command, run_status_command,
+        run_tool_command,
     },
     config::Config,
     context::ContextManager,
@@ -28,6 +29,7 @@ use ironclaw::{
         ContainerJobConfig, ContainerJobManager, OrchestratorApi, TokenStore,
         api::OrchestratorState,
     },
+    pairing::PairingStore,
     safety::SafetyLayer,
     secrets::{PostgresSecretsStore, SecretsCrypto, SecretsStore},
     setup::{SetupConfig, SetupWizard},
@@ -132,6 +134,15 @@ async fn main() -> anyhow::Result<()> {
                 };
 
             return run_memory_command(mem_cmd.clone(), store.pool(), embeddings).await;
+        }
+        Some(Command::Pairing(pairing_cmd)) => {
+            tracing_subscriber::fmt()
+                .with_env_filter(
+                    EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("warn")),
+                )
+                .init();
+
+            return run_pairing_command(pairing_cmd.clone()).map_err(|e| anyhow::anyhow!("{}", e));
         }
         Some(Command::Status) => {
             tracing_subscriber::fmt()
@@ -272,8 +283,10 @@ async fn main() -> anyhow::Result<()> {
     };
     let session = create_session_manager(session_config).await;
 
-    // Ensure we're authenticated before proceeding (may trigger login flow)
-    session.ensure_authenticated().await?;
+    // Ensure we're authenticated before proceeding (only needed for NEAR AI backend)
+    if config.llm.backend == ironclaw::config::LlmBackend::NearAi {
+        session.ensure_authenticated().await?;
+    }
 
     // Initialize tracing
     let env_filter = EnvFilter::try_from_default_env()
@@ -300,7 +313,7 @@ async fn main() -> anyhow::Result<()> {
 
     tracing::info!("Starting IronClaw...");
     tracing::info!("Loaded configuration for agent: {}", config.agent.name);
-    tracing::info!("NEAR AI session authenticated");
+    tracing::info!("LLM backend: {}", config.llm.backend);
 
     // Initialize database store (optional for testing)
     let store = if cli.no_db {
@@ -724,7 +737,8 @@ async fn main() -> anyhow::Result<()> {
         match WasmChannelRuntime::new(WasmChannelRuntimeConfig::default()) {
             Ok(runtime) => {
                 let runtime = Arc::new(runtime);
-                let loader = WasmChannelLoader::new(Arc::clone(&runtime));
+                let pairing_store = Arc::new(PairingStore::new());
+                let loader = WasmChannelLoader::new(Arc::clone(&runtime), pairing_store);
 
                 match loader
                     .load_from_dir(&config.channels.wasm_channels_dir)

@@ -18,7 +18,9 @@ use crate::channels::IncomingMessage;
 use crate::channels::web::types::SseEvent;
 use crate::context::{ContextManager, JobContext, JobState};
 use crate::history::{SandboxJobRecord, Store};
+use crate::orchestrator::auth::CredentialGrant;
 use crate::orchestrator::job_manager::{ContainerJobManager, JobMode};
+use crate::secrets::SecretsStore;
 use crate::tools::tool::{Tool, ToolError, ToolOutput};
 
 /// Tool for creating a new job.
@@ -34,6 +36,8 @@ pub struct CreateJobTool {
     event_tx: Option<tokio::sync::broadcast::Sender<(Uuid, SseEvent)>>,
     /// Injection channel for pushing messages into the agent loop.
     inject_tx: Option<tokio::sync::mpsc::Sender<IncomingMessage>>,
+    /// Encrypted secrets store for validating credential grants.
+    secrets_store: Option<Arc<dyn SecretsStore + Send + Sync>>,
 }
 
 impl CreateJobTool {
@@ -44,6 +48,7 @@ impl CreateJobTool {
             store: None,
             event_tx: None,
             inject_tx: None,
+            secrets_store: None,
         }
     }
 
@@ -70,8 +75,73 @@ impl CreateJobTool {
         self
     }
 
+    /// Inject secrets store for credential validation.
+    pub fn with_secrets(mut self, secrets: Arc<dyn SecretsStore + Send + Sync>) -> Self {
+        self.secrets_store = Some(secrets);
+        self
+    }
+
     fn sandbox_enabled(&self) -> bool {
         self.job_manager.is_some()
+    }
+
+    /// Parse and validate the `credentials` parameter.
+    ///
+    /// Each key is a secret name (must exist in SecretsStore), each value is the
+    /// env var name the container should receive it as. Returns an empty vec if
+    /// no credentials were requested.
+    async fn parse_credentials(
+        &self,
+        params: &serde_json::Value,
+        user_id: &str,
+    ) -> Result<Vec<CredentialGrant>, ToolError> {
+        let creds_obj = match params.get("credentials").and_then(|v| v.as_object()) {
+            Some(obj) if !obj.is_empty() => obj,
+            _ => return Ok(vec![]),
+        };
+
+        let secrets = match &self.secrets_store {
+            Some(s) => s,
+            None => {
+                return Err(ToolError::ExecutionFailed(
+                    "credentials requested but no secrets store is configured. \
+                     Set SECRETS_MASTER_KEY to enable credential management."
+                        .to_string(),
+                ));
+            }
+        };
+
+        let mut grants = Vec::with_capacity(creds_obj.len());
+        for (secret_name, env_var_value) in creds_obj {
+            let env_var = env_var_value.as_str().ok_or_else(|| {
+                ToolError::InvalidParameters(format!(
+                    "credential env var for '{}' must be a string",
+                    secret_name
+                ))
+            })?;
+
+            // Validate the secret actually exists
+            let exists = secrets.exists(user_id, secret_name).await.map_err(|e| {
+                ToolError::ExecutionFailed(format!(
+                    "failed to check secret '{}': {}",
+                    secret_name, e
+                ))
+            })?;
+
+            if !exists {
+                return Err(ToolError::ExecutionFailed(format!(
+                    "secret '{}' not found. Store it first via 'ironclaw tool auth' or the web UI.",
+                    secret_name
+                )));
+            }
+
+            grants.push(CredentialGrant {
+                secret_name: secret_name.clone(),
+                env_var: env_var.to_string(),
+            });
+        }
+
+        Ok(grants)
     }
 
     /// Persist a sandbox job record (fire-and-forget).
@@ -153,6 +223,7 @@ impl CreateJobTool {
         explicit_dir: Option<PathBuf>,
         wait: bool,
         mode: JobMode,
+        credential_grants: Vec<CredentialGrant>,
         ctx: &JobContext,
     ) -> Result<ToolOutput, ToolError> {
         let start = std::time::Instant::now();
@@ -193,7 +264,7 @@ impl CreateJobTool {
 
         // Create the container job with the pre-determined job_id.
         let _token = jm
-            .create_job(job_id, task, Some(project_dir), mode)
+            .create_job(job_id, task, Some(project_dir), mode, credential_grants)
             .await
             .map_err(|e| {
                 self.update_status(
@@ -468,6 +539,13 @@ impl Tool for CreateJobTool {
                         "type": "string",
                         "description": "Path to an existing project directory to mount into the container. \
                                         Must be under ~/.ironclaw/projects/. If omitted, a fresh directory is created."
+                    },
+                    "credentials": {
+                        "type": "object",
+                        "description": "Map of secret names to env var names. Each secret must exist in the \
+                                        secrets store (via 'ironclaw tool auth' or web UI). Example: \
+                                        {\"github_token\": \"GITHUB_TOKEN\", \"npm_token\": \"NPM_TOKEN\"}",
+                        "additionalProperties": { "type": "string" }
                     }
                 },
                 "required": ["title", "description"]
@@ -529,9 +607,12 @@ impl Tool for CreateJobTool {
                 .and_then(|v| v.as_str())
                 .map(PathBuf::from);
 
+            // Parse and validate credential grants
+            let credential_grants = self.parse_credentials(&params, &ctx.user_id).await?;
+
             // Combine title and description into the task prompt for the sub-agent.
             let task = format!("{}\n\n{}", title, description);
-            self.execute_sandbox(&task, explicit_dir, wait, mode, ctx)
+            self.execute_sandbox(&task, explicit_dir, wait, mode, credential_grants, ctx)
                 .await
         } else {
             self.execute_local(title, description, ctx).await
@@ -1215,6 +1296,109 @@ mod tests {
             props.contains_key("project_dir"),
             "sandbox schema must expose project_dir"
         );
+    }
+
+    #[test]
+    fn test_sandbox_schema_includes_credentials() {
+        let manager = Arc::new(ContextManager::new(5));
+        let jm = Arc::new(ContainerJobManager::new(
+            crate::orchestrator::job_manager::ContainerJobConfig::default(),
+            crate::orchestrator::TokenStore::new(),
+        ));
+        let tool = CreateJobTool::new(manager).with_sandbox(jm, None);
+        let schema = tool.parameters_schema();
+        let props = schema.get("properties").unwrap().as_object().unwrap();
+        assert!(
+            props.contains_key("credentials"),
+            "sandbox schema must expose credentials"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_parse_credentials_empty() {
+        let manager = Arc::new(ContextManager::new(5));
+        let tool = CreateJobTool::new(manager);
+
+        // No credentials parameter
+        let params = serde_json::json!({"title": "t", "description": "d"});
+        let grants = tool.parse_credentials(&params, "user1").await.unwrap();
+        assert!(grants.is_empty());
+
+        // Empty credentials object
+        let params = serde_json::json!({"credentials": {}});
+        let grants = tool.parse_credentials(&params, "user1").await.unwrap();
+        assert!(grants.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_parse_credentials_no_secrets_store() {
+        let manager = Arc::new(ContextManager::new(5));
+        let tool = CreateJobTool::new(manager);
+
+        let params = serde_json::json!({"credentials": {"my_secret": "MY_SECRET"}});
+        let result = tool.parse_credentials(&params, "user1").await;
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("no secrets store"),
+            "expected 'no secrets store' error, got: {}",
+            err
+        );
+    }
+
+    #[tokio::test]
+    async fn test_parse_credentials_missing_secret() {
+        use crate::secrets::{InMemorySecretsStore, SecretsCrypto};
+        use secrecy::SecretString;
+
+        let manager = Arc::new(ContextManager::new(5));
+        let key = "0123456789abcdef0123456789abcdef";
+        let crypto = Arc::new(SecretsCrypto::new(SecretString::from(key.to_string())).unwrap());
+        let secrets: Arc<dyn SecretsStore + Send + Sync> =
+            Arc::new(InMemorySecretsStore::new(crypto));
+
+        let tool = CreateJobTool::new(manager).with_secrets(Arc::clone(&secrets));
+
+        let params = serde_json::json!({"credentials": {"nonexistent_secret": "SOME_VAR"}});
+        let result = tool.parse_credentials(&params, "user1").await;
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("not found"),
+            "expected 'not found' error, got: {}",
+            err
+        );
+    }
+
+    #[tokio::test]
+    async fn test_parse_credentials_valid() {
+        use crate::secrets::{CreateSecretParams, InMemorySecretsStore, SecretsCrypto};
+        use secrecy::SecretString;
+
+        let manager = Arc::new(ContextManager::new(5));
+        let key = "0123456789abcdef0123456789abcdef";
+        let crypto = Arc::new(SecretsCrypto::new(SecretString::from(key.to_string())).unwrap());
+        let secrets: Arc<dyn SecretsStore + Send + Sync> =
+            Arc::new(InMemorySecretsStore::new(Arc::clone(&crypto)));
+
+        // Store a secret
+        secrets
+            .create(
+                "user1",
+                CreateSecretParams::new("github_token", "ghp_test123"),
+            )
+            .await
+            .unwrap();
+
+        let tool = CreateJobTool::new(manager).with_secrets(Arc::clone(&secrets));
+
+        let params = serde_json::json!({
+            "credentials": {"github_token": "GITHUB_TOKEN"}
+        });
+        let grants = tool.parse_credentials(&params, "user1").await.unwrap();
+        assert_eq!(grants.len(), 1);
+        assert_eq!(grants[0].secret_name, "github_token");
+        assert_eq!(grants[0].env_var, "GITHUB_TOKEN");
     }
 
     fn test_prompt_tool(queue: PromptQueue) -> JobPromptTool {

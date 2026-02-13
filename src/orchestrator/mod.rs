@@ -13,6 +13,7 @@
 //! │    POST /worker/{id}/llm/complete               │
 //! │    POST /worker/{id}/llm/complete_with_tools    │
 //! │    GET  /worker/{id}/job                        │
+//! │    GET  /worker/{id}/credentials                │
 //! │    POST /worker/{id}/status                     │
 //! │    POST /worker/{id}/complete                   │
 //! │                                                 │
@@ -23,6 +24,7 @@
 //! │                                                 │
 //! │  TokenStore                                     │
 //! │    per-job bearer tokens (in-memory only)       │
+//! │    per-job credential grants (in-memory only)   │
 //! └───────────────────────────────────────────────┘
 //! ```
 
@@ -31,7 +33,7 @@ pub mod auth;
 pub mod job_manager;
 
 pub use api::OrchestratorApi;
-pub use auth::TokenStore;
+pub use auth::{CredentialGrant, TokenStore};
 pub use job_manager::{
     CompletionResult, ContainerHandle, ContainerJobConfig, ContainerJobManager, JobMode,
 };

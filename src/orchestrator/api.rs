@@ -19,10 +19,11 @@ use crate::history::Store;
 use crate::llm::{CompletionRequest, LlmProvider, ToolCompletionRequest};
 use crate::orchestrator::auth::{TokenStore, worker_auth_middleware};
 use crate::orchestrator::job_manager::ContainerJobManager;
+use crate::secrets::SecretsStore;
 use crate::worker::api::JobEventPayload;
 use crate::worker::api::{
-    CompletionReport, JobDescription, ProxyCompletionRequest, ProxyCompletionResponse,
-    ProxyToolCompletionRequest, ProxyToolCompletionResponse, StatusUpdate,
+    CompletionReport, CredentialResponse, JobDescription, ProxyCompletionRequest,
+    ProxyCompletionResponse, ProxyToolCompletionRequest, ProxyToolCompletionResponse, StatusUpdate,
 };
 
 /// A follow-up prompt queued for a Claude Code bridge.
@@ -44,6 +45,10 @@ pub struct OrchestratorState {
     pub prompt_queue: Arc<Mutex<HashMap<Uuid, VecDeque<PendingPrompt>>>>,
     /// Database handle for persisting job events.
     pub store: Option<Arc<Store>>,
+    /// Encrypted secrets store for credential injection into containers.
+    pub secrets_store: Option<Arc<dyn SecretsStore + Send + Sync>>,
+    /// User ID for secret lookups (single-tenant, typically "default").
+    pub user_id: String,
 }
 
 /// The orchestrator's internal API server.
@@ -64,6 +69,7 @@ impl OrchestratorApi {
             .route("/worker/{job_id}/complete", post(report_complete))
             .route("/worker/{job_id}/event", post(job_event_handler))
             .route("/worker/{job_id}/prompt", get(get_prompt_handler))
+            .route("/worker/{job_id}/credentials", get(get_credentials_handler))
             .route_layer(axum::middleware::from_fn_with_state(
                 state.token_store.clone(),
                 worker_auth_middleware,
@@ -356,6 +362,68 @@ async fn get_prompt_handler(
     Ok((StatusCode::NO_CONTENT, Json(serde_json::Value::Null)))
 }
 
+/// Serve decrypted credentials for a job's granted secrets.
+///
+/// Returns 204 if no grants exist, 503 if no secrets store is configured,
+/// or a JSON array of `{ env_var, value }` pairs.
+async fn get_credentials_handler(
+    State(state): State<OrchestratorState>,
+    Path(job_id): Path<Uuid>,
+) -> Result<(StatusCode, Json<serde_json::Value>), StatusCode> {
+    let grants = match state.token_store.get_grants(job_id).await {
+        Some(g) if !g.is_empty() => g,
+        _ => return Ok((StatusCode::NO_CONTENT, Json(serde_json::Value::Null))),
+    };
+
+    let secrets = state.secrets_store.as_ref().ok_or_else(|| {
+        tracing::error!("Credentials requested but no secrets store configured");
+        StatusCode::SERVICE_UNAVAILABLE
+    })?;
+
+    let mut credentials: Vec<CredentialResponse> = Vec::with_capacity(grants.len());
+
+    for grant in &grants {
+        let decrypted = secrets
+            .get_decrypted(&state.user_id, &grant.secret_name)
+            .await
+            .map_err(|e| {
+                tracing::error!(
+                    job_id = %job_id,
+                    secret = %grant.secret_name,
+                    "Failed to decrypt secret for credential grant: {}", e
+                );
+                StatusCode::INTERNAL_SERVER_ERROR
+            })?;
+
+        // Record usage for audit trail
+        if let Ok(secret) = secrets.get(&state.user_id, &grant.secret_name).await {
+            if let Err(e) = secrets.record_usage(secret.id).await {
+                tracing::warn!(
+                    secret = %grant.secret_name,
+                    "Failed to record credential usage: {}", e
+                );
+            }
+        }
+
+        tracing::info!(
+            job_id = %job_id,
+            env_var = %grant.env_var,
+            secret = %grant.secret_name,
+            "Serving credential to container"
+        );
+
+        credentials.push(CredentialResponse {
+            env_var: grant.env_var.clone(),
+            value: decrypted.expose().to_string(),
+        });
+    }
+
+    Ok((
+        StatusCode::OK,
+        Json(serde_json::to_value(&credentials).unwrap_or(serde_json::Value::Null)),
+    ))
+}
+
 fn format_finish_reason(reason: crate::llm::FinishReason) -> String {
     match reason {
         crate::llm::FinishReason::Stop => "stop".to_string(),
@@ -422,6 +490,8 @@ mod tests {
             job_event_tx: None,
             prompt_queue: Arc::new(Mutex::new(HashMap::new())),
             store: None,
+            secrets_store: None,
+            user_id: "default".to_string(),
         }
     }
 

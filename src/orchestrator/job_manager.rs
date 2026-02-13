@@ -12,7 +12,7 @@ use tokio::sync::RwLock;
 use uuid::Uuid;
 
 use crate::error::OrchestratorError;
-use crate::orchestrator::auth::TokenStore;
+use crate::orchestrator::auth::{CredentialGrant, TokenStore};
 use crate::sandbox::connect_docker;
 
 /// Which mode a sandbox container runs in.
@@ -137,16 +137,24 @@ impl ContainerJobManager {
     /// Create and start a new container for a job.
     ///
     /// The caller provides the `job_id` so it can be persisted to the database
-    /// before the container is created. Returns the auth token for the worker.
+    /// before the container is created. Credential grants are stored in the
+    /// TokenStore and served on-demand via the `/credentials` endpoint.
+    /// Returns the auth token for the worker.
     pub async fn create_job(
         &self,
         job_id: Uuid,
         task: &str,
         project_dir: Option<PathBuf>,
         mode: JobMode,
+        credential_grants: Vec<CredentialGrant>,
     ) -> Result<String, OrchestratorError> {
         // Generate auth token (stored in TokenStore, never logged)
         let token = self.token_store.create_token(job_id).await;
+
+        // Store credential grants (revoked automatically when the token is revoked)
+        self.token_store
+            .store_grants(job_id, credential_grants)
+            .await;
 
         // Record the handle
         let handle = ContainerHandle {
@@ -185,12 +193,6 @@ impl ContainerJobManager {
             format!("IRONCLAW_JOB_ID={}", job_id),
             format!("IRONCLAW_ORCHESTRATOR_URL={}", orchestrator_url),
         ];
-
-        // Forward host credentials into the container so tools like `gh` work.
-        if let Ok(gh_token) = std::env::var("GITHUB_TOKEN") {
-            env_vec.push(format!("GITHUB_TOKEN={}", gh_token));
-            env_vec.push(format!("GH_TOKEN={}", gh_token));
-        }
 
         // Build volume mounts (validate project_dir stays within ~/.ironclaw/projects/)
         let mut binds = Vec::new();

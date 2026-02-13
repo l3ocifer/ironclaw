@@ -11,6 +11,7 @@ use crate::history::Store;
 use crate::llm::{LlmProvider, ToolDefinition};
 use crate::orchestrator::job_manager::ContainerJobManager;
 use crate::safety::SafetyLayer;
+use crate::secrets::SecretsStore;
 use crate::tools::builder::{BuildSoftwareTool, BuilderConfig, LlmSoftwareBuilder};
 use crate::tools::builtin::{
     ApplyPatchTool, CancelJobTool, CreateJobTool, EchoTool, HttpTool, JobEventsTool, JobPromptTool,
@@ -189,6 +190,7 @@ impl ToolRegistry {
     /// Job tools allow the LLM to create, list, check status, and cancel jobs.
     /// When sandbox deps are provided, `create_job` automatically delegates to
     /// Docker containers. Otherwise it creates in-memory jobs via ContextManager.
+    #[allow(clippy::too_many_arguments)]
     pub fn register_job_tools(
         &self,
         context_manager: Arc<ContextManager>,
@@ -199,6 +201,7 @@ impl ToolRegistry {
         >,
         inject_tx: Option<tokio::sync::mpsc::Sender<crate::channels::IncomingMessage>>,
         prompt_queue: Option<PromptQueue>,
+        secrets_store: Option<Arc<dyn SecretsStore + Send + Sync>>,
     ) {
         let mut create_tool = CreateJobTool::new(Arc::clone(&context_manager));
         if let Some(jm) = job_manager {
@@ -206,6 +209,9 @@ impl ToolRegistry {
         }
         if let (Some(etx), Some(itx)) = (job_event_tx, inject_tx) {
             create_tool = create_tool.with_monitor_deps(etx, itx);
+        }
+        if let Some(secrets) = secrets_store {
+            create_tool = create_tool.with_secrets(secrets);
         }
         self.register_sync(Arc::new(create_tool));
         self.register_sync(Arc::new(ListJobsTool::new(Arc::clone(&context_manager))));

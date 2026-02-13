@@ -487,6 +487,7 @@ mod tests {
             ws_tracker: Some(Arc::new(WsConnectionTracker::new())),
             llm_provider: None,
             chat_rate_limiter: crate::channels::web::server::RateLimiter::new(30, 60),
+            agent_card_json: None,
         }
     }
 }

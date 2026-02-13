@@ -43,13 +43,17 @@
 mod chunker;
 mod document;
 mod embeddings;
+mod logseq;
+pub mod merge;
 #[cfg(feature = "postgres")]
 mod repository;
 mod search;
+pub mod tasks;
 
 pub use chunker::{ChunkConfig, chunk_document};
 pub use document::{MemoryChunk, MemoryDocument, WorkspaceEntry, paths};
 pub use embeddings::{EmbeddingProvider, MockEmbeddings, NearAiEmbeddings, OpenAiEmbeddings};
+pub use logseq::load_logseq_context;
 #[cfg(feature = "postgres")]
 pub use repository::Repository;
 pub use search::{RankedResult, SearchConfig, SearchResult, reciprocal_rank_fusion};
@@ -518,9 +522,14 @@ impl Workspace {
 
     /// Build the system prompt from identity files.
     ///
-    /// Loads AGENTS.md, SOUL.md, USER.md, and IDENTITY.md to compose
-    /// the agent's system prompt.
-    pub async fn system_prompt(&self) -> Result<String, WorkspaceError> {
+    /// Loads AGENTS.md, SOUL.md, USER.md, and IDENTITY.md, then daily logs.
+    /// When `include_memory` is true (main/direct session only), also loads MEMORY.md
+    /// and optionally prepends `logseq_context` for Logseq bootstrap.
+    pub async fn system_prompt(
+        &self,
+        include_memory: bool,
+        logseq_context: Option<&str>,
+    ) -> Result<String, WorkspaceError> {
         let mut parts = Vec::new();
 
         // Load identity files in order of importance
@@ -553,6 +562,22 @@ impl Workspace {
                     "## Yesterday's Notes"
                 };
                 parts.push(format!("{}\n\n{}", header, doc.content));
+            }
+        }
+
+        // Long-term memory: only in main/direct sessions (privacy).
+        if include_memory {
+            let mut memory_parts = Vec::new();
+            if let Some(ctx) = logseq_context.filter(|s| !s.is_empty()) {
+                memory_parts.push(format!("## Logseq Memory Context\n\n{}", ctx));
+            }
+            if let Ok(doc) = self.read(paths::MEMORY).await {
+                if !doc.content.is_empty() {
+                    memory_parts.push(doc.content);
+                }
+            }
+            if !memory_parts.is_empty() {
+                parts.push(format!("## Long-term Memory\n\n{}", memory_parts.join("\n\n---\n\n")));
             }
         }
 

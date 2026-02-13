@@ -7,8 +7,10 @@ mod http;
 mod job;
 mod json;
 mod memory;
+mod python;
 pub mod routine;
 pub(crate) mod shell;
+pub mod task;
 mod time;
 
 pub use echo::EchoTool;
@@ -20,8 +22,10 @@ pub use http::HttpTool;
 pub use job::{CancelJobTool, CreateJobTool, JobStatusTool, ListJobsTool};
 pub use json::JsonTool;
 pub use memory::{MemoryReadTool, MemorySearchTool, MemoryTreeTool, MemoryWriteTool};
+pub use python::PythonTool;
 pub use routine::{
     RoutineCreateTool, RoutineDeleteTool, RoutineHistoryTool, RoutineListTool, RoutineUpdateTool,
 };
 pub use shell::ShellTool;
+pub use task::{TaskCreateTool, TaskExportTool, TaskListTool, TaskReadyTool, TaskUpdateTool};
 pub use time::TimeTool;

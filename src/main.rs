@@ -590,7 +590,29 @@ async fn main() -> anyhow::Result<()> {
         }
         let workspace = Arc::new(workspace);
         tools.register_memory_tools(workspace);
+
+        // Register task management tools for multi-agent coordination (PostgreSQL only)
+        #[cfg(feature = "postgres")]
+        if let Some(ref pool) = pg_pool {
+            let task_repo = Arc::new(
+                ironclaw::workspace::tasks::TaskRepository::new(pool.clone()),
+            );
+            let task_user_id = config
+                .channels
+                .gateway
+                .as_ref()
+                .map(|g| g.user_id.clone())
+                .unwrap_or_else(|| "default".to_string());
+            tools.register_task_tools(
+                task_repo,
+                config.agent.agent_id.clone(),
+                task_user_id,
+            );
+        }
     }
+
+    // Register Python sandbox tool
+    tools.register_python_tool();
 
     // Register builder tool if enabled.
     // When sandbox is enabled and allow_local_tools is false, skip builder registration

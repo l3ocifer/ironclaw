@@ -138,6 +138,8 @@ pub struct ShellTool {
     sandbox: Option<Arc<SandboxManager>>,
     /// Sandbox policy to use when sandbox is available.
     sandbox_policy: SandboxPolicy,
+    /// Command guard for blocking destructive commands.
+    command_guard: crate::safety::command_guard::CommandGuard,
 }
 
 impl std::fmt::Debug for ShellTool {
@@ -161,7 +163,18 @@ impl ShellTool {
             allow_dangerous: false,
             sandbox: None,
             sandbox_policy: SandboxPolicy::ReadOnly,
+            command_guard: crate::safety::command_guard::CommandGuard::default(),
         }
+    }
+
+    /// Set a custom command guard configuration.
+    pub fn with_command_guard(
+        mut self,
+        enabled: bool,
+        fail_mode: crate::safety::command_guard::FailMode,
+    ) -> Self {
+        self.command_guard = crate::safety::command_guard::CommandGuard::new(enabled, fail_mode);
+        self
     }
 
     /// Set the working directory.
@@ -323,7 +336,26 @@ impl ShellTool {
         workdir: Option<&str>,
         timeout: Option<u64>,
     ) -> Result<(String, i64), ToolError> {
-        // Check for blocked commands
+        // Check command guard first (dcg-inspired pattern matching)
+        let guard_verdict = self.command_guard.check(cmd);
+        if let crate::safety::command_guard::GuardVerdict::Block {
+            reason,
+            pack,
+            severity,
+            suggestion,
+        } = guard_verdict
+        {
+            let mut msg = format!(
+                "Command blocked by {} guard [{}]: {}",
+                pack, severity, reason
+            );
+            if let Some(alt) = suggestion {
+                msg.push_str(&format!("\n  Suggestion: {}", alt));
+            }
+            return Err(ToolError::NotAuthorized(msg));
+        }
+
+        // Legacy blocked commands check (fallback)
         if let Some(reason) = self.is_blocked(cmd) {
             return Err(ToolError::NotAuthorized(format!(
                 "{}: {}",

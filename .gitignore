@@ -9,3 +9,6 @@ target/
 # WASM build artifacts (loaded from disk, not bundled)
 *.wasm
 
+# Reference repos (cloned locally, not committed)
+examples/reference-repos/
+

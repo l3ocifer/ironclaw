@@ -435,7 +435,7 @@ async fn execute_lightweight(
     );
 
     // Get system prompt
-    let system_prompt = match ctx.workspace.system_prompt().await {
+    let system_prompt = match ctx.workspace.system_prompt(true, None).await {
         Ok(p) => p,
         Err(e) => {
             tracing::warn!(routine = %routine.name, "Failed to get system prompt: {}", e);

@@ -84,6 +84,7 @@ mod loader;
 mod rate_limiter;
 mod runtime;
 mod storage;
+pub mod verification;
 mod wrapper;
 
 // Core types
@@ -128,3 +129,6 @@ pub use capabilities_schema::{
     AuthCapabilitySchema, CapabilitiesFile, OAuthConfigSchema, RateLimitSchema,
     ValidationEndpointSchema,
 };
+
+// Checksum verification
+pub use verification::{ChecksumStore, ToolChecksum, VerifyResult};

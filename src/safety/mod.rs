@@ -7,11 +7,15 @@
 //! - Enforcing safety policies
 //! - Detecting secret leakage in outputs
 
+pub mod command_guard;
+pub mod integrity;
 mod leak_detector;
 mod policy;
 mod sanitizer;
 mod validator;
 
+pub use command_guard::{CommandGuard, FailMode, GuardVerdict};
+pub use integrity::{IntegrityMonitor, IntegrityViolation, ProtectionMode};
 pub use leak_detector::{
     LeakAction, LeakDetectionError, LeakDetector, LeakMatch, LeakPattern, LeakScanResult,
     LeakSeverity,

@@ -84,6 +84,7 @@ impl GatewayChannel {
             ws_tracker: Some(Arc::new(ws::WsConnectionTracker::new())),
             llm_provider: None,
             chat_rate_limiter: server::RateLimiter::new(30, 60),
+            agent_card_json: None,
         });
 
         Self {
@@ -111,6 +112,7 @@ impl GatewayChannel {
             ws_tracker: self.state.ws_tracker.clone(),
             llm_provider: self.state.llm_provider.clone(),
             chat_rate_limiter: server::RateLimiter::new(30, 60),
+            agent_card_json: self.state.agent_card_json.clone(),
         };
         mutate(&mut new_state);
         self.state = Arc::new(new_state);

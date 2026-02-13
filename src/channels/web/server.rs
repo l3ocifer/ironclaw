@@ -141,6 +141,8 @@ pub struct GatewayState {
     pub llm_provider: Option<Arc<dyn crate::llm::LlmProvider>>,
     /// Rate limiter for chat endpoints (30 messages per 60 seconds).
     pub chat_rate_limiter: RateLimiter,
+    /// Pre-rendered agent card JSON (ERC-8004). None = not serving.
+    pub agent_card_json: Option<String>,
 }
 
 /// Start the gateway HTTP server.
@@ -166,7 +168,12 @@ pub async fn start_server(
             })?;
 
     // Public routes (no auth)
-    let public = Router::new().route("/api/health", get(health_handler));
+    let public = Router::new()
+        .route("/api/health", get(health_handler))
+        .route(
+            "/.well-known/agent-card.json",
+            get(agent_card_handler),
+        );
 
     // Protected routes (require auth)
     let auth_state = AuthState { token: auth_token };
@@ -341,6 +348,23 @@ async fn health_handler() -> Json<HealthResponse> {
         status: "healthy",
         channel: "gateway",
     })
+}
+
+/// Serve the ERC-8004 agent card at `/.well-known/agent-card.json`.
+///
+/// Returns 404 if the agent card is not configured.
+async fn agent_card_handler(
+    State(state): State<Arc<GatewayState>>,
+) -> impl IntoResponse {
+    match &state.agent_card_json {
+        Some(json) => (
+            StatusCode::OK,
+            [(header::CONTENT_TYPE, "application/json")],
+            json.clone(),
+        )
+            .into_response(),
+        None => StatusCode::NOT_FOUND.into_response(),
+    }
 }
 
 // --- Chat handlers ---

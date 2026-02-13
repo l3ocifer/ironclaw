@@ -16,7 +16,7 @@ use crate::agent::session_manager::SessionManager;
 use crate::agent::submission::{Submission, SubmissionParser, SubmissionResult};
 use crate::agent::{HeartbeatConfig as AgentHeartbeatConfig, MessageIntent, Router, Scheduler};
 use crate::channels::{ChannelManager, IncomingMessage, OutgoingResponse, StatusUpdate};
-use crate::config::{AgentConfig, HeartbeatConfig, RoutineConfig};
+use crate::config::{AgentConfig, HeartbeatConfig, MemoryFlushConfig, RoutineConfig};
 use crate::context::ContextManager;
 use crate::context::JobContext;
 use crate::db::Database;
@@ -26,6 +26,21 @@ use crate::llm::{ChatMessage, LlmProvider, Reasoning, ReasoningContext, RespondR
 use crate::safety::SafetyLayer;
 use crate::tools::ToolRegistry;
 use crate::workspace::Workspace;
+
+/// Channels that represent main/direct sessions (not group chats).
+/// Only in these do we include MEMORY.md in the system prompt for privacy.
+const MAIN_SESSION_CHANNELS: &[&str] = &["cli", "repl", "web", "gateway", "tui"];
+
+fn is_main_session(channel: &str) -> bool {
+    MAIN_SESSION_CHANNELS.contains(&channel)
+}
+
+/// Ensure thread.metadata is a JSON object so we can insert keys.
+fn ensure_metadata_object(thread: &mut crate::agent::session::Thread) {
+    if !thread.metadata.is_object() {
+        thread.metadata = serde_json::Value::Object(serde_json::Map::new());
+    }
+}
 
 /// Collapse a tool output string into a single-line preview for display.
 pub(crate) fn truncate_for_preview(output: &str, max_chars: usize) -> String {
@@ -518,6 +533,99 @@ impl Agent {
             message.content.len()
         );
 
+        // Audit log for command submissions (Phase 3.4: Command audit logging)
+        match &submission {
+            Submission::UserInput { .. } => {} // Don't log user text
+            sub => {
+                let cmd_name = match sub {
+                    Submission::Undo => "undo",
+                    Submission::Redo => "redo",
+                    Submission::Interrupt => "interrupt",
+                    Submission::Compact => "compact",
+                    Submission::Clear => "clear",
+                    Submission::NewThread => "new",
+                    Submission::Heartbeat => "heartbeat",
+                    Submission::Summarize => "summarize",
+                    Submission::Suggest => "suggest",
+                    Submission::Quit => "quit",
+                    Submission::SwitchThread { .. } => "switch_thread",
+                    Submission::Resume { .. } => "resume",
+                    Submission::ExecApproval { .. } => "exec_approval",
+                    Submission::ApprovalResponse { .. } => "approval_response",
+                    Submission::SystemCommand { command, .. } => command.as_str(),
+                    Submission::UserInput { .. } => unreachable!(),
+                };
+                tracing::info!(
+                    target: "audit",
+                    command = cmd_name,
+                    channel = message.channel.as_str(),
+                    user = message.user_id.as_str(),
+                    thread = %thread_id,
+                );
+            }
+        }
+
+        // Daily session reset check (Phase 3.3)
+        if let Some(reset_hour) = self.config.daily_reset_hour {
+            let should_reset = {
+                let sess = session.lock().await;
+                if let Some(thread) = sess.threads.get(&thread_id) {
+                    let last_active = thread.updated_at;
+                    let now = chrono::Utc::now();
+                    // Check if last activity was before today's reset hour
+                    let today_reset = now
+                        .date_naive()
+                        .and_hms_opt(reset_hour as u32, 0, 0)
+                        .map(|dt| dt.and_utc());
+                    if let Some(reset_time) = today_reset {
+                        last_active < reset_time && now >= reset_time
+                    } else {
+                        false
+                    }
+                } else {
+                    false
+                }
+            };
+
+            if should_reset && matches!(submission, Submission::UserInput { .. }) {
+                tracing::info!(
+                    "Daily session reset triggered (reset_hour={})",
+                    reset_hour
+                );
+                if let Some(ws) = self.workspace() {
+                    let _ = self
+                        .save_thread_to_workspace_before_new(session.clone(), thread_id, ws.as_ref())
+                        .await;
+                }
+                // Create new thread for this user/channel
+                let _ = self.process_new_thread(message).await;
+                // Re-resolve the thread after reset
+                let (new_session, new_thread_id) = self
+                    .session_manager
+                    .resolve_thread(
+                        &message.user_id,
+                        &message.channel,
+                        message.thread_id.as_deref(),
+                    )
+                    .await;
+                // Continue processing with the new thread
+                return self
+                    .process_user_input(
+                        message,
+                        new_session,
+                        new_thread_id,
+                        &message.content,
+                    )
+                    .await
+                    .map(|r| match r {
+                        SubmissionResult::Response { content } => Some(content),
+                        SubmissionResult::Ok { message } => message,
+                        SubmissionResult::Error { message } => Some(format!("Error: {}", message)),
+                        _ => Some(String::new()),
+                    });
+            }
+        }
+
         // Process based on submission type
         let result = match submission {
             Submission::UserInput { content } => {
@@ -532,7 +640,17 @@ impl Agent {
             Submission::Interrupt => self.process_interrupt(session, thread_id).await,
             Submission::Compact => self.process_compact(session, thread_id).await,
             Submission::Clear => self.process_clear(session, thread_id).await,
-            Submission::NewThread => self.process_new_thread(message).await,
+            Submission::NewThread => {
+                if let Some(ws) = self.workspace() {
+                    if let Err(e) = self
+                        .save_thread_to_workspace_before_new(session.clone(), thread_id, ws.as_ref())
+                        .await
+                    {
+                        tracing::warn!("Failed to save thread to workspace on /new: {}", e);
+                    }
+                }
+                self.process_new_thread(message).await
+            }
             Submission::Heartbeat => self.process_heartbeat().await,
             Submission::Summarize => self.process_summarize(session, thread_id).await,
             Submission::Suggest => self.process_suggest(session, thread_id).await,
@@ -787,6 +905,58 @@ impl Agent {
                 let pct = self.context_monitor.usage_percent(&messages);
                 tracing::info!("Context at {:.1}% capacity, auto-compacting", pct);
 
+                // Pre-compaction memory flush: one silent turn to remind model to write durable memory
+                let compaction_count = thread
+                    .metadata
+                    .get("compaction_count")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0)
+                    + 1;
+                let last_flush = thread
+                    .metadata
+                    .get("memory_flush_compaction_count")
+                    .and_then(|v| v.as_u64());
+                let run_flush = self
+                    .config
+                    .memory_flush
+                    .as_ref()
+                    .map(|m| m.enabled)
+                    .unwrap_or(false)
+                    && self.workspace().is_some()
+                    && last_flush != Some(compaction_count);
+
+                if run_flush {
+                    ensure_metadata_object(thread);
+                    thread
+                        .metadata
+                        .as_object_mut()
+                        .unwrap()
+                        .insert(
+                            "memory_flush_compaction_count".to_string(),
+                            serde_json::json!(compaction_count),
+                        );
+                    let flush_cfg = self.config.memory_flush.clone().unwrap();
+                    drop(sess);
+                    if let Err(e) = self
+                        .run_memory_flush_turn(&flush_cfg, message.user_id.as_str())
+                        .await
+                    {
+                        tracing::warn!("Pre-compaction memory flush failed: {}", e);
+                    }
+                    sess = session.lock().await;
+                }
+
+                let thread = sess
+                    .threads
+                    .get_mut(&thread_id)
+                    .ok_or_else(|| Error::from(crate::error::JobError::NotFound { id: thread_id }))?;
+                ensure_metadata_object(thread);
+                thread
+                    .metadata
+                    .as_object_mut()
+                    .unwrap()
+                    .insert("compaction_count".to_string(), serde_json::json!(compaction_count));
+
                 // Notify the user that compaction is happening
                 let _ = self
                     .channels
@@ -1019,9 +1189,21 @@ impl Agent {
         initial_messages: Vec<ChatMessage>,
         resume_after_tool: bool,
     ) -> Result<AgenticLoopResult, Error> {
-        // Load workspace system prompt (identity files: AGENTS.md, SOUL.md, etc.)
+        // Load workspace system prompt (identity files + optional MEMORY.md in main session)
         let system_prompt = if let Some(ws) = self.workspace() {
-            match ws.system_prompt().await {
+            let include_memory = is_main_session(&message.channel);
+            let logseq_context = self
+                .config
+                .logseq
+                .as_ref()
+                .map(|c| crate::workspace::load_logseq_context(c, &self.config.name))
+                .unwrap_or_default();
+            let logseq_opt = if logseq_context.is_empty() {
+                None
+            } else {
+                Some(logseq_context.as_str())
+            };
+            match ws.system_prompt(include_memory, logseq_opt).await {
                 Ok(prompt) if !prompt.is_empty() => Some(prompt),
                 Ok(_) => None,
                 Err(e) => {
@@ -1031,6 +1213,37 @@ impl Agent {
             }
         } else {
             None
+        };
+
+        // Build skills prompt (progressive disclosure — only name + description in system prompt)
+        let skills_prompt = {
+            let load_opts = self.config.skills.to_load_options(None);
+            let snapshot = crate::skills::build_skill_snapshot(&load_opts);
+            if !snapshot.skills.is_empty() {
+                tracing::debug!(
+                    "Loaded {} skills: {}",
+                    snapshot.skills.len(),
+                    snapshot
+                        .skills
+                        .iter()
+                        .map(|s| s.name.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                );
+            }
+            if snapshot.prompt.is_empty() {
+                None
+            } else {
+                Some(snapshot.prompt)
+            }
+        };
+
+        // Combine workspace system prompt + skills prompt
+        let system_prompt = match (system_prompt, skills_prompt) {
+            (Some(ws), Some(sk)) => Some(format!("{}\n\n{}", ws, sk)),
+            (Some(ws), None) => Some(ws),
+            (None, Some(sk)) => Some(sk),
+            (None, None) => None,
         };
 
         let mut reasoning = Reasoning::new(self.llm().clone(), self.safety().clone());
@@ -2011,6 +2224,187 @@ impl Agent {
                 Ok(Some(msg))
             }
         }
+    }
+
+    /// Run one silent LLM turn to remind the model to write durable memory (pre-compaction).
+    /// Maximum iterations for memory flush tool calls (prevents runaway).
+    const MEMORY_FLUSH_MAX_ITERATIONS: usize = 3;
+
+    async fn run_memory_flush_turn(
+        &self,
+        flush_cfg: &MemoryFlushConfig,
+        _user_id: &str,
+    ) -> Result<(), Error> {
+        // Build memory tools list: memory_write, memory_read, memory_search
+        // These are the only tools available during flush (no shell, no file, no HTTP).
+        let tool_defs = self
+            .tools()
+            .tool_definitions_for(&[
+                "memory_write",
+                "memory_read",
+                "memory_search",
+                "memory_append",
+            ])
+            .await;
+
+        let reasoning = Reasoning::new(self.llm().clone(), self.safety().clone())
+            .with_system_prompt(flush_cfg.system_prompt.clone());
+        let messages = vec![ChatMessage::user(&flush_cfg.prompt)];
+        let context = ReasoningContext::new()
+            .with_messages(messages)
+            .with_tools(tool_defs);
+
+        let output = reasoning.respond_with_tools(&context).await?;
+
+        // Extract the text content from the result
+        let text = match &output.result {
+            RespondResult::Text(s) => s.clone(),
+            RespondResult::ToolCalls { content, .. } => content.clone().unwrap_or_default(),
+        };
+
+        // If the model responded with NO_REPLY, nothing to store
+        if text.trim() == "NO_REPLY" {
+            tracing::debug!("Memory flush: model had nothing to store");
+            return Ok(());
+        }
+
+        // Log the flush response for diagnostics
+        if !text.is_empty() {
+            tracing::debug!(
+                "Memory flush response ({}): {}",
+                crate::agent::context_monitor::estimate_text_tokens(&text),
+                truncate_for_preview(&text, 200)
+            );
+        }
+
+        Ok(())
+    }
+
+    /// Run BOOT.md instructions on startup (if present in workspace).
+    ///
+    /// Reads BOOT.md content and executes it as a single agent turn with
+    /// full tool access. Output is suppressed (NO_REPLY expected).
+    async fn run_boot_if_present(&self, user_id: &str) -> Result<(), Error> {
+        let workspace = match self.workspace() {
+            Some(ws) => ws,
+            None => return Ok(()),
+        };
+
+        let boot_content = match workspace.read("BOOT.md").await {
+            Ok(doc) if !doc.content.trim().is_empty() => doc.content,
+            _ => return Ok(()),
+        };
+
+        tracing::info!("Running BOOT.md startup instructions");
+
+        let system_prompt = workspace
+            .system_prompt(true, None)
+            .await
+            .unwrap_or_else(|_| "You are a helpful assistant.".to_string());
+
+        let reasoning = Reasoning::new(self.llm().clone(), self.safety().clone())
+            .with_system_prompt(system_prompt);
+
+        let boot_prompt = format!(
+            "Execute the following startup instructions. When done, reply with NO_REPLY.\n\n{}",
+            boot_content
+        );
+        let messages = vec![ChatMessage::user(&boot_prompt)];
+
+        // Full tool access for boot instructions (same trust as AGENTS.md)
+        let tools = self.tools().tool_definitions().await;
+
+        let context = ReasoningContext::new()
+            .with_messages(messages)
+            .with_tools(tools);
+
+        match reasoning.respond_with_tools(&context).await {
+            Ok(output) => {
+                let text = match &output.result {
+                    RespondResult::Text(s) => s.clone(),
+                    RespondResult::ToolCalls { content, .. } => {
+                        content.clone().unwrap_or_default()
+                    }
+                };
+                if text.trim() != "NO_REPLY" && !text.is_empty() {
+                    tracing::info!(
+                        "BOOT.md output: {}",
+                        truncate_for_preview(&text, 200)
+                    );
+                }
+                tracing::info!("BOOT.md startup instructions completed");
+            }
+            Err(e) => {
+                tracing::warn!("BOOT.md execution failed: {}", e);
+            }
+        }
+
+        // Audit log
+        tracing::info!(
+            target: "audit",
+            command = "boot",
+            user = user_id,
+            "Ran BOOT.md startup instructions"
+        );
+
+        Ok(())
+    }
+
+    /// Save the current thread's last N messages to workspace when user runs /new.
+    const SESSION_SAVE_MESSAGE_COUNT: usize = 15;
+
+    async fn save_thread_to_workspace_before_new(
+        &self,
+        session: Arc<Mutex<Session>>,
+        thread_id: Uuid,
+        workspace: &Workspace,
+    ) -> Result<(), Error> {
+        let messages = {
+            let sess = session.lock().await;
+            let thread = match sess.threads.get(&thread_id) {
+                Some(t) => t,
+                None => return Ok(()),
+            };
+            let msgs = thread.messages();
+            if msgs.is_empty() {
+                return Ok(());
+            }
+            let start = msgs.len().saturating_sub(Self::SESSION_SAVE_MESSAGE_COUNT);
+            msgs[start..].to_vec()
+        };
+
+        let now = chrono::Utc::now();
+        let date_str = now.format("%Y-%m-%d").to_string();
+        let time_str = now.format("%H%M%S").to_string();
+        let path = format!("daily/{}-session-{}.md", date_str, time_str);
+
+        let mut lines = vec![
+            format!("# Session: {} UTC", now.format("%Y-%m-%d %H:%M:%S")),
+            String::new(),
+            format!("- **Thread ID**: {}", thread_id),
+            format!("- **Source**: /new"),
+            String::new(),
+            "## Conversation".to_string(),
+            String::new(),
+        ];
+        for msg in &messages {
+            let role = match msg.role {
+                crate::llm::Role::User => "user",
+                crate::llm::Role::Assistant => "assistant",
+                crate::llm::Role::System => "system",
+                crate::llm::Role::Tool => "tool",
+            };
+            lines.push(format!("**{}**: {}", role, msg.content.trim()));
+            lines.push(String::new());
+        }
+        let content = lines.join("\n");
+
+        workspace
+            .write(&path, &content)
+            .await
+            .map_err(Error::from)?;
+        tracing::info!("Saved thread to workspace: {}", path);
+        Ok(())
     }
 
     async fn process_new_thread(

@@ -16,7 +16,8 @@ use crate::tools::builder::{BuildSoftwareTool, BuilderConfig, LlmSoftwareBuilder
 use crate::tools::builtin::{
     ApplyPatchTool, CancelJobTool, CreateJobTool, EchoTool, HttpTool, JobStatusTool, JsonTool,
     ListDirTool, ListJobsTool, MemoryReadTool, MemorySearchTool, MemoryTreeTool, MemoryWriteTool,
-    ReadFileTool, ShellTool, TimeTool, ToolActivateTool, ToolAuthTool, ToolInstallTool,
+    PythonTool, ReadFileTool, ShellTool, TaskCreateTool, TaskExportTool, TaskListTool,
+    TaskReadyTool, TaskUpdateTool, TimeTool, ToolActivateTool, ToolAuthTool, ToolInstallTool,
     ToolListTool, ToolRemoveTool, ToolSearchTool, WriteFileTool,
 };
 use crate::tools::tool::{Tool, ToolDomain};
@@ -25,6 +26,7 @@ use crate::tools::wasm::{
     WasmToolStore, WasmToolWrapper,
 };
 use crate::workspace::Workspace;
+use crate::workspace::tasks::TaskRepository;
 
 /// Names of built-in tools that cannot be shadowed by dynamic registrations.
 /// This prevents a dynamically built or installed tool from replacing a
@@ -59,6 +61,12 @@ const PROTECTED_TOOL_NAMES: &[&str] = &[
     "routine_update",
     "routine_delete",
     "routine_history",
+    "python",
+    "task_create",
+    "task_list",
+    "task_update",
+    "task_ready",
+    "task_export",
 ];
 
 /// Registry of available tools.
@@ -299,6 +307,48 @@ impl ToolRegistry {
         )));
         self.register_sync(Arc::new(RoutineHistoryTool::new(store)));
         tracing::info!("Registered 5 routine management tools");
+    }
+
+    /// Register the sandboxed Python execution tool.
+    ///
+    /// Uses monty (Rust-native Python interpreter) for safe code execution
+    /// with configurable resource limits. No filesystem or network access.
+    pub fn register_python_tool(&self) {
+        self.register_sync(Arc::new(PythonTool::new()));
+        tracing::info!("Registered Python sandbox tool");
+    }
+
+    /// Register multi-agent task management tools.
+    ///
+    /// These allow agents to create, list, update, and coordinate tasks
+    /// across the multi-agent task graph stored in PostgreSQL.
+    pub fn register_task_tools(
+        &self,
+        repo: Arc<TaskRepository>,
+        agent_id: String,
+        user_id: String,
+    ) {
+        self.register_sync(Arc::new(TaskCreateTool::new(
+            Arc::clone(&repo),
+            agent_id.clone(),
+            user_id.clone(),
+        )));
+        self.register_sync(Arc::new(TaskListTool::new(
+            Arc::clone(&repo),
+            user_id.clone(),
+        )));
+        self.register_sync(Arc::new(TaskUpdateTool::new(
+            Arc::clone(&repo),
+            agent_id.clone(),
+            user_id.clone(),
+        )));
+        self.register_sync(Arc::new(TaskReadyTool::new(
+            Arc::clone(&repo),
+            agent_id,
+            user_id.clone(),
+        )));
+        self.register_sync(Arc::new(TaskExportTool::new(repo, user_id)));
+        tracing::info!("Registered 5 task management tools");
     }
 
     /// Register the software builder tool.

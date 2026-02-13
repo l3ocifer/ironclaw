@@ -391,7 +391,7 @@ async fn test_workspace_system_prompt() {
 
     // Get system prompt
     let prompt = workspace
-        .system_prompt()
+        .system_prompt(true, None)
         .await
         .expect("system_prompt failed");
 

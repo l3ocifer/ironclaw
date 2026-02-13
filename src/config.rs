@@ -39,6 +39,8 @@ pub struct Config {
     pub routines: RoutineConfig,
     pub sandbox: SandboxModeConfig,
     pub claude_code: ClaudeCodeConfig,
+    pub identity: IdentityConfig,
+    pub skills: SkillsConfig,
 }
 
 impl Config {
@@ -97,6 +99,8 @@ impl Config {
             routines: RoutineConfig::resolve()?,
             sandbox: SandboxModeConfig::resolve()?,
             claude_code: ClaudeCodeConfig::resolve()?,
+            identity: IdentityConfig::resolve(settings)?,
+            skills: SkillsConfig::resolve(settings)?,
         })
     }
 }
@@ -722,6 +726,10 @@ fn default_channels_dir() -> PathBuf {
 #[derive(Debug, Clone)]
 pub struct AgentConfig {
     pub name: String,
+    /// Unique agent identifier for multi-agent scoping (e.g., "frack", "frick").
+    /// Used by task graph, workspace isolation, and event logging.
+    /// Defaults to the lowercase agent name.
+    pub agent_id: String,
     pub max_parallel_jobs: usize,
     pub job_timeout: Duration,
     pub stuck_threshold: Duration,
@@ -733,12 +741,65 @@ pub struct AgentConfig {
     pub session_idle_timeout: Duration,
     /// Allow chat to use filesystem/shell tools directly (bypass sandbox).
     pub allow_local_tools: bool,
+    /// Pre-compaction memory flush. When set and enabled, run a silent turn before compaction.
+    pub memory_flush: Option<MemoryFlushConfig>,
+    /// Logseq graph integration. When set and graph_path present, inject at bootstrap.
+    pub logseq: Option<LogseqConfig>,
+    /// Daily session reset hour (0-23 local time). None = disabled.
+    pub daily_reset_hour: Option<u8>,
+    /// Reserve tokens floor for compaction threshold override.
+    pub compaction_reserve_tokens_floor: Option<usize>,
+    /// Command guard configuration.
+    pub command_guard: CommandGuardConfig,
+    /// Skills configuration (directories, per-skill overrides, compatibility).
+    pub skills: SkillsConfig,
+}
+
+/// Pre-compaction memory flush configuration.
+#[derive(Clone, Debug)]
+pub struct MemoryFlushConfig {
+    pub enabled: bool,
+    pub soft_threshold_tokens: usize,
+    pub system_prompt: String,
+    pub prompt: String,
+}
+
+/// Command guard configuration.
+#[derive(Debug, Clone)]
+pub struct CommandGuardConfig {
+    pub enabled: bool,
+    pub fail_mode: crate::safety::command_guard::FailMode,
+}
+
+impl Default for CommandGuardConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            fail_mode: crate::safety::command_guard::FailMode::Open,
+        }
+    }
+}
+
+/// Logseq bootstrap configuration.
+#[derive(Debug, Clone)]
+pub struct LogseqConfig {
+    pub graph_path: std::path::PathBuf,
+    pub ai_namespace: String,
+    pub max_tokens: usize,
+    pub include_user_profile: bool,
+    pub include_preferences: bool,
+    pub include_decisions: bool,
 }
 
 impl AgentConfig {
     fn resolve(settings: &Settings) -> Result<Self, ConfigError> {
+        let name =
+            optional_env("AGENT_NAME")?.unwrap_or_else(|| settings.agent.name.clone());
+        let agent_id = optional_env("AGENT_ID")?
+            .unwrap_or_else(|| name.to_lowercase().replace(' ', "-"));
         Ok(Self {
-            name: optional_env("AGENT_NAME")?.unwrap_or_else(|| settings.agent.name.clone()),
+            name,
+            agent_id,
             max_parallel_jobs: optional_env("AGENT_MAX_PARALLEL_JOBS")?
                 .map(|s| s.parse())
                 .transpose()
@@ -811,8 +872,65 @@ impl AgentConfig {
                     message: format!("must be 'true' or 'false': {e}"),
                 })?
                 .unwrap_or(false),
+            memory_flush: settings
+                .memory
+                .compaction_memory_flush
+                .as_ref()
+                .filter(|m| m.enabled)
+                .map(|m| MemoryFlushConfig {
+                    enabled: m.enabled,
+                    soft_threshold_tokens: m.soft_threshold_tokens,
+                    system_prompt: m.system_prompt.clone(),
+                    prompt: m.prompt.clone(),
+                }),
+            logseq: settings.memory.logseq.as_ref().and_then(|l| {
+                l.graph_path.as_ref().and_then(|p| {
+                    let path = expand_tilde(p);
+                    if path.is_empty() {
+                        None
+                    } else {
+                        Some(LogseqConfig {
+                            graph_path: std::path::PathBuf::from(path),
+                            ai_namespace: l.ai_namespace.clone(),
+                            max_tokens: l.max_tokens,
+                            include_user_profile: l.include_user_profile,
+                            include_preferences: l.include_preferences,
+                            include_decisions: l.include_decisions,
+                        })
+                    }
+                })
+            }),
+            daily_reset_hour: settings.agent.daily_reset_hour.filter(|&h| h < 24),
+            compaction_reserve_tokens_floor: settings.agent.compaction_reserve_tokens_floor,
+            command_guard: {
+                let cg = &settings.safety.command_guard;
+                let fail_mode = match cg.fail_mode.as_str() {
+                    "closed" => crate::safety::command_guard::FailMode::Closed,
+                    _ => crate::safety::command_guard::FailMode::Open,
+                };
+                CommandGuardConfig {
+                    enabled: cg.enabled,
+                    fail_mode,
+                }
+            },
+            skills: SkillsConfig::resolve(settings)?,
         })
     }
+}
+
+/// Expand leading ~ to home directory.
+fn expand_tilde(p: &str) -> String {
+    let s = p.trim();
+    if s == "~" || s.starts_with("~/") {
+        if let Some(home) = std::env::var_os("HOME") {
+            let home = home.to_string_lossy();
+            if s == "~" {
+                return home.to_string();
+            }
+            return format!("{}/{}", home, s.trim_start_matches("~/"));
+        }
+    }
+    s.to_string()
 }
 
 /// Safety configuration.
@@ -1401,6 +1519,136 @@ pub async fn inject_llm_keys_from_secrets(
     }
 
     let _ = INJECTED_VARS.set(injected);
+}
+
+/// Agent identity configuration (ERC-8004).
+#[derive(Clone, Debug)]
+pub struct IdentityConfig {
+    /// Agent display name for the agent card.
+    pub agent_name: String,
+    /// Whether to serve /.well-known/agent-card.json from the gateway.
+    pub serve_agent_card: bool,
+    /// Service endpoints advertised in the agent card.
+    pub services: Vec<ServiceEndpoint>,
+    /// Agent description for the registration file.
+    pub description: Option<String>,
+    /// Agent image URL for the registration file.
+    pub image_url: Option<String>,
+    /// ERC-8004 network (e.g., "ethereum_mainnet"). None = local only.
+    pub erc8004_network: Option<String>,
+    /// ERC-8004 agent ID (token ID). None = not registered.
+    pub erc8004_agent_id: Option<u64>,
+    /// Source for Ethereum keypair.
+    pub ethereum_key_source: crate::settings::KeySource,
+}
+
+/// A service endpoint in the agent card.
+#[derive(Clone, Debug)]
+pub struct ServiceEndpoint {
+    pub name: String,
+    pub endpoint: String,
+    pub version: Option<String>,
+}
+
+impl IdentityConfig {
+    fn resolve(settings: &Settings) -> Result<Self, ConfigError> {
+        let id = &settings.identity;
+        let agent_name = optional_env("AGENT_IDENTITY_NAME")?
+            .or_else(|| id.agent_name.clone())
+            .unwrap_or_else(|| settings.agent.name.clone());
+
+        let services: Vec<ServiceEndpoint> = id
+            .services
+            .iter()
+            .map(|s| ServiceEndpoint {
+                name: s.name.clone(),
+                endpoint: s.endpoint.clone(),
+                version: s.version.clone(),
+            })
+            .collect();
+
+        Ok(Self {
+            agent_name,
+            serve_agent_card: id.serve_agent_card,
+            services,
+            description: id.description.clone(),
+            image_url: id.image_url.clone(),
+            erc8004_network: id.erc8004_network.clone(),
+            erc8004_agent_id: id.erc8004_agent_id,
+            ethereum_key_source: id.ethereum_key_source,
+        })
+    }
+}
+
+/// Agent Skills configuration (resolved from settings).
+#[derive(Clone, Debug)]
+pub struct SkillsConfig {
+    /// Additional skill directories to scan.
+    pub extra_dirs: Vec<std::path::PathBuf>,
+    /// Allowlist for bundled skills. Empty = all allowed.
+    pub bundled_allowlist: Vec<String>,
+    /// Whether to scan `~/.claude/skills/` for Anthropic ecosystem compatibility.
+    pub include_claude_skills: bool,
+    /// Whether to scan `~/.cursor/skills/` for Cursor IDE compatibility.
+    pub include_cursor_skills: bool,
+    /// Per-skill configuration (resolved from settings).
+    pub skill_config: std::collections::HashMap<String, crate::skills::SkillConfig>,
+}
+
+impl SkillsConfig {
+    fn resolve(settings: &Settings) -> Result<Self, ConfigError> {
+        let s = &settings.skills;
+
+        let extra_dirs: Vec<std::path::PathBuf> = s
+            .extra_dirs
+            .iter()
+            .map(|d| {
+                let expanded = expand_tilde(d);
+                std::path::PathBuf::from(expanded)
+            })
+            .collect();
+
+        let skill_config: std::collections::HashMap<String, crate::skills::SkillConfig> = s
+            .entries
+            .iter()
+            .map(|(key, entry)| {
+                (
+                    key.clone(),
+                    crate::skills::SkillConfig {
+                        enabled: entry.enabled,
+                        api_key: entry.api_key.clone(),
+                        env: entry.env.clone(),
+                    },
+                )
+            })
+            .collect();
+
+        Ok(Self {
+            extra_dirs,
+            bundled_allowlist: s.allow_bundled.clone(),
+            include_claude_skills: s.include_claude_skills,
+            include_cursor_skills: s.include_cursor_skills,
+            skill_config,
+        })
+    }
+
+    /// Build `SkillLoadOptions` from this config with optional workspace directory.
+    pub fn to_load_options(
+        &self,
+        workspace_dir: Option<std::path::PathBuf>,
+    ) -> crate::skills::SkillLoadOptions {
+        crate::skills::SkillLoadOptions {
+            bundled_dir: crate::skills::resolve_bundled_skills_dir(),
+            managed_dir: None, // defaults to ~/.ironclaw/skills/
+            workspace_dir,
+            extra_dirs: self.extra_dirs.clone(),
+            include_claude_skills: self.include_claude_skills,
+            include_cursor_skills: self.include_cursor_skills,
+            skill_config: self.skill_config.clone(),
+            bundled_allowlist: self.bundled_allowlist.clone(),
+            skill_filter: None,
+        }
+    }
 }
 
 // Helper functions

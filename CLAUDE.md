@@ -796,3 +796,102 @@ Documents are chunked for search indexing:
 - Default: 800 words per chunk (roughly 800 tokens for English)
 - 15% overlap between chunks for context preservation
 - Minimum chunk size: 50 words (tiny trailing chunks merge with previous)
+
+---
+
+## Custom Extensions (Fork-Specific)
+
+The following sections document features added in the `l3ocifer/ironclaw` fork on top of the upstream `nearai/ironclaw` codebase.
+
+### OpenClaw Memory Transfer
+
+Ported from [OpenClaw](https://github.com/openclaw/openclaw) (TypeScript) to Rust. Full plan: [`docs/MEMORY_TRANSFER_PLAN.md`](docs/MEMORY_TRANSFER_PLAN.md).
+
+| Feature | File | Description |
+|---------|------|-------------|
+| Session save on `/new` | `src/agent/agent_loop.rs` | Last 15 messages saved to `daily/YYYY-MM-DD-session-HHMMSS.md` |
+| Pre-compaction memory flush | `src/agent/agent_loop.rs` | Silent LLM turn before compaction to persist durable notes |
+| MEMORY.md main-session only | `src/agent/agent_loop.rs` | MEMORY.md excluded from group chats for privacy |
+| Logseq integration | `src/workspace/logseq.rs` | Reads user profile, preferences, decisions from Logseq graph |
+| AGENTS.md template | `docs/reference/AGENTS.recommended.md` | Recommended workspace instructions template |
+
+### Multi-Agent Task Graph
+
+Inspired by [beads](https://github.com/steveyegge/beads). PostgreSQL DAG for task coordination across agents.
+
+| File | Purpose |
+|------|---------|
+| `migrations/V9__agent_tasks.sql` | Schema: `agent_tasks`, `agent_task_deps`, `agent_task_events` tables |
+| `src/workspace/tasks.rs` | `TaskRepository` with CRUD, cycle detection, auto-promotion |
+| `src/tools/builtin/task.rs` | 5 LLM tools: `task_create`, `task_list`, `task_update`, `task_ready`, `task_export` |
+
+### Semantic Merge
+
+Uses vendored [weave-core](https://github.com/Ataraxy-Labs/weave) for entity-level 3-way merge.
+
+| File | Purpose |
+|------|---------|
+| `src/workspace/merge.rs` | `semantic_merge`, `merge_prefer_ours`, `merge_with_markers` |
+| `vendor/weave-core/` | Vendored (upstream pins sem-core 0.2, we need 0.3) |
+
+### Sandboxed Python
+
+Uses [monty](https://github.com/pydantic/monty) (Rust-native Python interpreter) with resource limits.
+
+| File | Purpose |
+|------|---------|
+| `src/tools/builtin/python.rs` | `PythonTool` — time/memory limited, no I/O |
+
+### Security Hardening
+
+| File | Purpose |
+|------|---------|
+| `src/safety/command_guard.rs` | Destructive command blocking for shell tool |
+| `src/safety/integrity.rs` | Workspace identity file SHA-256 drift detection |
+| `src/tools/wasm/verification.rs` | WASM tool checksum verification on load |
+
+### Agent Skills
+
+57 bundled skills in `skills/` at repo root. Auto-discovered from exe dir, ancestor dirs, or CWD.
+
+| File | Purpose |
+|------|---------|
+| `src/skills/mod.rs` | Module root, public exports |
+| `src/skills/loader.rs` | Multi-source discovery (`resolve_bundled_skills_dir`) |
+| `src/skills/frontmatter.rs` | YAML frontmatter parser for SKILL.md |
+| `src/skills/eligibility.rs` | OS, bins, env var checks |
+| `src/skills/prompt.rs` | XML prompt formatting per Agent Skills standard |
+
+### Additional Dependencies
+
+| Crate | Source | Notes |
+|-------|--------|-------|
+| `weave-core` | `vendor/weave-core/` (path) | Vendored from Ataraxy-Labs/weave rev `8c461b4`. sem-core bumped 0.2→0.3. |
+| `monty` | `git` rev `dcdf702` | Sandboxed Python interpreter. |
+
+### Environment Variables (Fork-Specific)
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `AGENT_ID` | lowercase `AGENT_NAME` | Unique ID for multi-agent scoping (e.g., `frack`, `frick`) |
+| `IRONCLAW_SKILLS_DIR` | (auto-detected) | Override bundled skills directory |
+
+### Deployment Topology
+
+| Agent | Host | Role |
+|-------|------|------|
+| Frack | MacBook | Primary interactive agent (CLI/TUI, web gateway) |
+| Frick | Homelab server (`alef`) | Production/infrastructure agent (shared PostgreSQL, K3s, Ollama) |
+
+Both share PostgreSQL on `alef` and Logseq (synced natively).
+
+### Roadmap
+
+Full plan: [`docs/INTEGRATION_PLAN.md`](docs/INTEGRATION_PLAN.md).
+
+- **Phase 1 (Security)**: Done — command guard, integrity, WASM verification
+- **Phase 2 (Compaction)**: Partial — `src/agent/compressor/` has dedup, dictionary, patterns
+- **Phase 3 (OpenClaw gaps)**: BOOT.md, memory flush with tools, daily session reset
+- **Phase 4 (Skills)**: Done — 57 bundled skills, multi-source discovery
+- **Phase 5 (Advanced)**: Done — weave-core, monty, task graph
+- **Phase 6+**: Frick deployment, multi-agent shared workspace, enhanced Logseq sync

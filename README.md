@@ -56,18 +56,27 @@ IronClaw is the AI assistant you can actually trust with your personal and profe
 - **Dynamic Tool Building** - Describe what you need, and IronClaw builds it as a WASM tool
 - **MCP Protocol** - Connect to Model Context Protocol servers for additional capabilities
 - **Plugin Architecture** - Drop in new WASM tools and channels without restarting
+- **Agent Skills** - 58 bundled skills with progressive loading (only name + description in context; full instructions on demand)
+- **Sandboxed Python** - Execute Python code safely via [monty](https://github.com/pydantic/monty) with resource limits (no I/O, no network)
 
 ### Persistent Memory
 
 - **Hybrid Search** - Full-text + vector search using Reciprocal Rank Fusion
 - **Workspace Filesystem** - Flexible path-based storage for notes, logs, and context
 - **Identity Files** - Maintain consistent personality and preferences across sessions
+- **Semantic Merge** - Entity-level 3-way merge via [weave-core](https://github.com/Ataraxy-Labs/weave) for concurrent multi-agent edits
+
+### Multi-Agent Coordination
+
+- **Task Graph** - PostgreSQL-backed DAG for task dependencies, priorities, and assignment across agents
+- **Agent Identity** - Per-agent `AGENT_ID` for task scoping and workspace isolation
+- **JSONL Export** - Beads-compatible task export/import for interoperability
 
 ## Installation
 
 ### Prerequisites
 
-- Rust 1.85+
+- Rust 1.90+
 - PostgreSQL 15+ with [pgvector](https://github.com/pgvector/pgvector) extension
 - NEAR AI account (authentication handled via setup wizard)
 
@@ -140,7 +149,21 @@ ironclaw onboard
 
 The wizard handles database connection, NEAR AI authentication (via browser OAuth),
 and secrets encryption (using your system keychain). All settings are saved to
-`~/.ironclaw/settings.toml`.
+`~/.ironclaw/settings.json`.
+
+### Multi-Agent Deployment
+
+To run multiple agents sharing the same PostgreSQL, set a unique `AGENT_ID` per instance:
+
+```bash
+# MacBook (Frack)
+AGENT_NAME=Frack AGENT_ID=frack ironclaw run
+
+# Homelab (Frick)
+AGENT_NAME=Frick AGENT_ID=frick ironclaw run
+```
+
+Agents share the same task graph and workspace, isolated by `(user_id, agent_id)`. See `.env.example` for all configuration options.
 
 ## Security
 
@@ -268,7 +291,7 @@ cargo test test_name
 
 ## OpenClaw Heritage
 
-IronClaw is a Rust reimplementation inspired by [OpenClaw](https://github.com/openclaw/openclaw). See [FEATURE_PARITY.md](FEATURE_PARITY.md) for the complete tracking matrix.
+IronClaw is a Rust reimplementation inspired by [OpenClaw](https://github.com/openclaw/openclaw). See [FEATURE_PARITY.md](FEATURE_PARITY.md) for the complete tracking matrix and [CLAUDE.md](CLAUDE.md) for full project context.
 
 Key differences:
 
@@ -276,6 +299,18 @@ Key differences:
 - **WASM sandbox vs Docker** - Lightweight, capability-based security
 - **PostgreSQL vs SQLite** - Production-ready persistence
 - **Security-first design** - Multiple defense layers, credential protection
+
+### Memory Features (from OpenClaw)
+
+The following memory and session persistence features have been ported from OpenClaw:
+
+- **Session save on `/new`** - Current conversation saved to `daily/` before starting a new thread
+- **Pre-compaction memory flush** - Silent LLM turn before compaction to persist durable notes
+- **Main-session-only MEMORY.md** - Long-term memory excluded from group/shared contexts for privacy
+- **Logseq integration** - Personal knowledge graph injected into agent context at bootstrap
+- **Recommended AGENTS.md template** - Operating instructions for memory-first agent behavior
+
+See [docs/MEMORY_TRANSFER_PLAN.md](docs/MEMORY_TRANSFER_PLAN.md) for the transfer plan and [docs/INTEGRATION_PLAN.md](docs/INTEGRATION_PLAN.md) for the full roadmap including reference repo integration.
 
 ## License
 

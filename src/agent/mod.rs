@@ -12,6 +12,7 @@
 
 mod agent_loop;
 pub mod compaction;
+pub mod compressor;
 pub mod context_monitor;
 mod heartbeat;
 mod router;

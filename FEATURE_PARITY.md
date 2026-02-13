@@ -19,7 +19,7 @@ This document tracks feature parity between IronClaw (Rust implementation) and O
 | Hub-and-spoke architecture | ✅ | ✅ | Web gateway as central hub |
 | WebSocket control plane | ✅ | ✅ | Gateway with WebSocket + SSE |
 | Single-user system | ✅ | ✅ | |
-| Multi-agent routing | ✅ | ❌ | Workspace isolation per-agent |
+| Multi-agent routing | ✅ | 🚧 | Task graph + workspace isolation per-agent |
 | Session-based messaging | ✅ | ✅ | Per-sender sessions |
 | Loopback-first networking | ✅ | ✅ | HTTP binds to 0.0.0.0 but can be configured |
 
@@ -108,7 +108,7 @@ This document tracks feature parity between IronClaw (Rust implementation) and O
 | `agents` | ✅ | ❌ | P3 | Multi-agent management |
 | `sessions` | ✅ | ❌ | P3 | Session listing |
 | `memory` | ✅ | ✅ | - | Memory search CLI |
-| `skills` | ✅ | ❌ | P3 | Agent skills |
+| `skills` | ✅ | ✅ | - | Agent skills (SKILL.md discovery, eligibility, progressive loading) |
 | `pairing` | ✅ | ✅ | - | list/approve for channel DM pairing |
 | `nodes` | ✅ | ❌ | P3 | Device management |
 | `plugins` | ✅ | ❌ | P3 | Plugin management |
@@ -139,7 +139,7 @@ This document tracks feature parity between IronClaw (Rust implementation) and O
 | Session pruning | ✅ | ❌ | Auto cleanup old sessions |
 | Context compaction | ✅ | ✅ | Auto summarization |
 | Custom system prompts | ✅ | ✅ | Template variables |
-| Skills (modular capabilities) | ✅ | ❌ | Capability bundles |
+| Skills (modular capabilities) | ✅ | ✅ | Multi-source discovery, eligibility, progressive disclosure |
 | Thinking modes (low/med/high) | ✅ | ❌ | Configurable reasoning depth |
 | Block-level streaming | ✅ | ❌ | |
 | Tool-level streaming | ✅ | ❌ | |
@@ -148,6 +148,9 @@ This document tracks feature parity between IronClaw (Rust implementation) and O
 | Exec approvals (`/approve`) | ✅ | ✅ | TUI approval overlay |
 | Elevated mode | ✅ | ❌ | Privileged execution |
 | Subagent support | ✅ | ✅ | Task framework |
+| Sandboxed Python execution | ❌ | ✅ | monty (Rust-native Python interpreter) |
+| Task graph (multi-agent) | ❌ | ✅ | PostgreSQL DAG, beads-compatible JSONL |
+| Semantic file merge | ❌ | ✅ | weave-core entity-level 3-way merge |
 | Auth profiles | ✅ | ❌ | Multiple auth strategies |
 
 ### Owner: _Unassigned_
@@ -423,11 +426,11 @@ This document tracks feature parity between IronClaw (Rust implementation) and O
 - ❌ Hooks system (beforeInbound, beforeToolCall, etc.)
 
 ### P2 - Medium Priority
-- ❌ Cron job scheduling
-- ❌ Web Control UI
-- ❌ WebChat channel
+- ✅ Cron job scheduling (routines)
+- ✅ Web Control UI (chat, memory, jobs, logs, extensions, routines)
+- ✅ WebChat channel (web gateway)
 - 🚧 Media handling (caption support; no image/PDF processing)
-- ❌ CLI subcommands (config, status, memory, doctor)
+- 🚧 CLI subcommands (onboard, config, status, memory done; doctor ❌)
 - ❌ Ollama/local model support
 - ❌ Configuration hot-reload
 - ❌ Webhook trigger endpoint in web gateway
@@ -439,7 +442,7 @@ This document tracks feature parity between IronClaw (Rust implementation) and O
 - ❌ Other messaging platforms
 - ❌ TTS/audio features
 - ❌ Video support
-- ❌ Skills system
+- ✅ Skills system (src/skills/, SKILL.md discovery from 6 sources, eligibility, progressive loading)
 - ❌ Plugin registry
 
 ---
@@ -469,5 +472,9 @@ IronClaw intentionally differs from OpenClaw in these ways:
 4. **NEAR AI focus**: Primary provider with session-based auth
 5. **No mobile/desktop apps**: Focus on server-side and CLI initially
 6. **WASM channels**: Novel extension mechanism not in OpenClaw
+7. **Sandboxed Python**: monty — Rust-native Python interpreter with resource limits
+8. **Task graph**: PostgreSQL DAG for multi-agent coordination (beads-inspired)
+9. **Semantic merge**: weave-core entity-level 3-way merge for concurrent workspace edits
+10. **Bundled skills**: 57 skills bundled in repo, auto-discovered from exe/env/CWD
 
 These are intentional architectural choices, not gaps to be filled.

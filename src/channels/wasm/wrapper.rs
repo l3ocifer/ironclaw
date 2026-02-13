@@ -76,6 +76,9 @@ struct ChannelStoreData {
     credentials: HashMap<String, String>,
     /// Pairing store for DM pairing (guest access control).
     pairing_store: Arc<PairingStore>,
+    /// Dedicated tokio runtime for HTTP requests, lazily initialized.
+    /// Reused across multiple `http_request` calls within one execution.
+    http_runtime: Option<tokio::runtime::Runtime>,
 }
 
 impl ChannelStoreData {
@@ -96,6 +99,7 @@ impl ChannelStoreData {
             table: ResourceTable::new(),
             credentials,
             pairing_store,
+            http_runtime: None,
         }
     }
 
@@ -287,10 +291,16 @@ impl near::agent::channel_host::Host for ChannelStoreData {
         // We're inside spawn_blocking, so we can't rely on the main runtime's
         // I/O driver (it may be busy with WASM compilation or other startup work).
         // A dedicated runtime gives us our own I/O driver and avoids contention.
-        let rt = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .map_err(|e| format!("Failed to create HTTP runtime: {e}"))?;
+        // The runtime is lazily created and reused across calls within one execution.
+        if self.http_runtime.is_none() {
+            self.http_runtime = Some(
+                tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .map_err(|e| format!("Failed to create HTTP runtime: {e}"))?,
+            );
+        }
+        let rt = self.http_runtime.as_ref().expect("just initialized");
         let result = rt.block_on(async {
             let client = reqwest::Client::builder()
                 .connect_timeout(std::time::Duration::from_secs(10))

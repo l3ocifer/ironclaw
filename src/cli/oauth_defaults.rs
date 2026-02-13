@@ -82,11 +82,22 @@ pub enum OAuthCallbackError {
 ///
 /// Tries IPv6 loopback (`[::1]`) first so that `http://localhost:…` redirects
 /// work on systems where `localhost` resolves to `::1`. Falls back to IPv4
-/// (`127.0.0.1`) if IPv6 binding fails.
+/// (`127.0.0.1`) only if IPv6 fails for a reason other than `AddrInUse`
+/// (e.g., IPv6 not supported on the host). If the port is already occupied
+/// on IPv6, the port is occupied period, so we fail immediately.
 pub async fn bind_callback_listener() -> Result<TcpListener, OAuthCallbackError> {
     let ipv6_addr = format!("[::1]:{}", OAUTH_CALLBACK_PORT);
-    if let Ok(listener) = TcpListener::bind(&ipv6_addr).await {
-        return Ok(listener);
+    match TcpListener::bind(&ipv6_addr).await {
+        Ok(listener) => return Ok(listener),
+        Err(e) if e.kind() == std::io::ErrorKind::AddrInUse => {
+            return Err(OAuthCallbackError::PortInUse(
+                OAUTH_CALLBACK_PORT,
+                e.to_string(),
+            ));
+        }
+        Err(_) => {
+            // IPv6 not available on this host, fall back to IPv4
+        }
     }
     TcpListener::bind(format!("127.0.0.1:{}", OAUTH_CALLBACK_PORT))
         .await

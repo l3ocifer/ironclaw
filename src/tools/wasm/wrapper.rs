@@ -96,6 +96,9 @@ struct StoreData {
     /// Pre-resolved credentials for automatic host-based injection.
     /// Applied by matching URL host against each credential's host_patterns.
     host_credentials: Vec<ResolvedHostCredential>,
+    /// Dedicated tokio runtime for HTTP requests, lazily initialized.
+    /// Reused across multiple `http_request` calls within one execution.
+    http_runtime: Option<tokio::runtime::Runtime>,
 }
 
 impl StoreData {
@@ -115,6 +118,7 @@ impl StoreData {
             table: ResourceTable::new(),
             credentials,
             host_credentials,
+            http_runtime: None,
         }
     }
 
@@ -319,10 +323,16 @@ impl near::agent::host::Host for StoreData {
         // We're inside spawn_blocking, so we can't rely on the main runtime's
         // I/O driver (it may be busy with WASM compilation or other startup work).
         // A dedicated runtime gives us our own I/O driver and avoids contention.
-        let rt = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .map_err(|e| format!("Failed to create HTTP runtime: {e}"))?;
+        // The runtime is lazily created and reused across calls within one execution.
+        if self.http_runtime.is_none() {
+            self.http_runtime = Some(
+                tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .map_err(|e| format!("Failed to create HTTP runtime: {e}"))?,
+            );
+        }
+        let rt = self.http_runtime.as_ref().expect("just initialized");
         let result = rt.block_on(async {
             let client = reqwest::Client::builder()
                 .connect_timeout(Duration::from_secs(10))

@@ -1062,16 +1062,10 @@ async fn main() -> anyhow::Result<()> {
 /// Check if onboarding is needed and return the reason.
 ///
 /// Returns `Some(reason)` if onboarding should be triggered, `None` otherwise.
+/// DATABASE_URL being set is sufficient to consider onboarding complete.
 async fn check_onboard_needed() -> Option<&'static str> {
-    // DATABASE_URL not set means we can't connect to anything
     if std::env::var("DATABASE_URL").is_err() {
         return Some("Database not configured");
-    }
-
-    // No session file means auth hasn't been set up
-    let session_path = ironclaw::llm::session::default_session_path();
-    if !session_path.exists() {
-        return Some("First run");
     }
 
     None

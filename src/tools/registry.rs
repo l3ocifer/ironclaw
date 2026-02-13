@@ -13,10 +13,11 @@ use crate::orchestrator::job_manager::ContainerJobManager;
 use crate::safety::SafetyLayer;
 use crate::tools::builder::{BuildSoftwareTool, BuilderConfig, LlmSoftwareBuilder};
 use crate::tools::builtin::{
-    ApplyPatchTool, CancelJobTool, CreateJobTool, EchoTool, HttpTool, JobStatusTool, JsonTool,
-    ListDirTool, ListJobsTool, MemoryReadTool, MemorySearchTool, MemoryTreeTool, MemoryWriteTool,
-    ReadFileTool, ShellTool, TimeTool, ToolActivateTool, ToolAuthTool, ToolInstallTool,
-    ToolListTool, ToolRemoveTool, ToolSearchTool, WriteFileTool,
+    ApplyPatchTool, CancelJobTool, CreateJobTool, EchoTool, HttpTool, JobEventsTool, JobPromptTool,
+    JobStatusTool, JsonTool, ListDirTool, ListJobsTool, MemoryReadTool, MemorySearchTool,
+    MemoryTreeTool, MemoryWriteTool, PromptQueue, ReadFileTool, ShellTool, TimeTool,
+    ToolActivateTool, ToolAuthTool, ToolInstallTool, ToolListTool, ToolRemoveTool, ToolSearchTool,
+    WriteFileTool,
 };
 use crate::tools::tool::{Tool, ToolDomain};
 use crate::tools::wasm::{
@@ -193,17 +194,37 @@ impl ToolRegistry {
         context_manager: Arc<ContextManager>,
         job_manager: Option<Arc<ContainerJobManager>>,
         store: Option<Arc<Store>>,
+        job_event_tx: Option<
+            tokio::sync::broadcast::Sender<(uuid::Uuid, crate::channels::web::types::SseEvent)>,
+        >,
+        inject_tx: Option<tokio::sync::mpsc::Sender<crate::channels::IncomingMessage>>,
+        prompt_queue: Option<PromptQueue>,
     ) {
         let mut create_tool = CreateJobTool::new(Arc::clone(&context_manager));
         if let Some(jm) = job_manager {
-            create_tool = create_tool.with_sandbox(jm, store);
+            create_tool = create_tool.with_sandbox(jm, store.clone());
+        }
+        if let (Some(etx), Some(itx)) = (job_event_tx, inject_tx) {
+            create_tool = create_tool.with_monitor_deps(etx, itx);
         }
         self.register_sync(Arc::new(create_tool));
         self.register_sync(Arc::new(ListJobsTool::new(Arc::clone(&context_manager))));
         self.register_sync(Arc::new(JobStatusTool::new(Arc::clone(&context_manager))));
         self.register_sync(Arc::new(CancelJobTool::new(context_manager)));
 
-        tracing::info!("Registered 4 job management tools");
+        // Register event reader if store is available
+        if let Some(store) = store {
+            self.register_sync(Arc::new(JobEventsTool::new(store)));
+            tracing::info!("Registered job_events tool");
+        }
+
+        // Register prompt tool if queue is available
+        if let Some(pq) = prompt_queue {
+            self.register_sync(Arc::new(JobPromptTool::new(pq)));
+            tracing::info!("Registered job_prompt tool");
+        }
+
+        tracing::info!("Registered job management tools");
     }
 
     /// Register extension management tools (search, install, auth, activate, list, remove).

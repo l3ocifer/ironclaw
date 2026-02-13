@@ -186,6 +186,12 @@ impl ContainerJobManager {
             format!("IRONCLAW_ORCHESTRATOR_URL={}", orchestrator_url),
         ];
 
+        // Forward host credentials into the container so tools like `gh` work.
+        if let Ok(gh_token) = std::env::var("GITHUB_TOKEN") {
+            env_vec.push(format!("GITHUB_TOKEN={}", gh_token));
+            env_vec.push(format!("GH_TOKEN={}", gh_token));
+        }
+
         // Build volume mounts (validate project_dir stays within ~/.ironclaw/projects/)
         let mut binds = Vec::new();
         if let Some(ref dir) = project_dir {

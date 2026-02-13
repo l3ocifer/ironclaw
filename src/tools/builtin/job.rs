@@ -14,6 +14,8 @@ use async_trait::async_trait;
 use chrono::Utc;
 use uuid::Uuid;
 
+use crate::channels::IncomingMessage;
+use crate::channels::web::types::SseEvent;
 use crate::context::{ContextManager, JobContext, JobState};
 use crate::history::{SandboxJobRecord, Store};
 use crate::orchestrator::job_manager::{ContainerJobManager, JobMode};
@@ -28,6 +30,10 @@ pub struct CreateJobTool {
     context_manager: Arc<ContextManager>,
     job_manager: Option<Arc<ContainerJobManager>>,
     store: Option<Arc<Store>>,
+    /// Broadcast sender for job events (used to subscribe a monitor).
+    event_tx: Option<tokio::sync::broadcast::Sender<(Uuid, SseEvent)>>,
+    /// Injection channel for pushing messages into the agent loop.
+    inject_tx: Option<tokio::sync::mpsc::Sender<IncomingMessage>>,
 }
 
 impl CreateJobTool {
@@ -36,6 +42,8 @@ impl CreateJobTool {
             context_manager,
             job_manager: None,
             store: None,
+            event_tx: None,
+            inject_tx: None,
         }
     }
 
@@ -47,6 +55,18 @@ impl CreateJobTool {
     ) -> Self {
         self.job_manager = Some(job_manager);
         self.store = store;
+        self
+    }
+
+    /// Inject monitor dependencies so fire-and-forget jobs spawn a background
+    /// monitor that forwards Claude Code output to the main agent loop.
+    pub fn with_monitor_deps(
+        mut self,
+        event_tx: tokio::sync::broadcast::Sender<(Uuid, SseEvent)>,
+        inject_tx: tokio::sync::mpsc::Sender<IncomingMessage>,
+    ) -> Self {
+        self.event_tx = Some(event_tx);
+        self.inject_tx = Some(inject_tx);
         self
     }
 
@@ -192,10 +212,16 @@ impl CreateJobTool {
         self.update_status(job_id, "running", None, None, Some(now), None);
 
         if !wait {
+            // Spawn a background monitor that forwards Claude Code output
+            // into the main agent loop.
+            if let (Some(etx), Some(itx)) = (&self.event_tx, &self.inject_tx) {
+                crate::agent::job_monitor::spawn_job_monitor(job_id, etx.subscribe(), itx.clone());
+            }
+
             let result = serde_json::json!({
                 "job_id": job_id.to_string(),
                 "status": "started",
-                "message": "Container started. Use job tools to check status.",
+                "message": "Container started. Use job_events to check status or job_prompt to send follow-up instructions.",
                 "project_dir": project_dir_str,
                 "browse_url": format!("/projects/{}", browse_id),
             });
@@ -430,6 +456,11 @@ impl Tool for CreateJobTool {
                         "enum": ["worker", "claude_code"],
                         "description": "Execution mode. 'worker' (default) uses the IronClaw sub-agent. \
                                         'claude_code' uses Claude Code CLI for full agentic software engineering."
+                    },
+                    "project_dir": {
+                        "type": "string",
+                        "description": "Path to an existing project directory to mount into the container. \
+                                        Must be under ~/.ironclaw/projects/. If omitted, a fresh directory is created."
                     }
                 },
                 "required": ["title", "description"]
@@ -486,9 +517,15 @@ impl Tool for CreateJobTool {
                 _ => JobMode::Worker,
             };
 
+            let explicit_dir = params
+                .get("project_dir")
+                .and_then(|v| v.as_str())
+                .map(PathBuf::from);
+
             // Combine title and description into the task prompt for the sub-agent.
             let task = format!("{}\n\n{}", title, description);
-            self.execute_sandbox(&task, None, wait, mode, ctx).await
+            self.execute_sandbox(&task, explicit_dir, wait, mode, ctx)
+                .await
         } else {
             self.execute_local(title, description, ctx).await
         }
@@ -771,6 +808,213 @@ impl Tool for CancelJobTool {
     }
 }
 
+/// Tool for reading sandbox job event logs.
+///
+/// Lets the main agent inspect what a running (or completed) container job has
+/// been doing: messages, tool calls, results, status changes, etc.
+pub struct JobEventsTool {
+    store: Arc<Store>,
+}
+
+impl JobEventsTool {
+    pub fn new(store: Arc<Store>) -> Self {
+        Self { store }
+    }
+}
+
+#[async_trait]
+impl Tool for JobEventsTool {
+    fn name(&self) -> &str {
+        "job_events"
+    }
+
+    fn description(&self) -> &str {
+        "Read the event log for a sandbox job. Shows messages, tool calls, results, \
+         and status changes from the container. Use this to check what Claude Code \
+         or a worker sub-agent has been doing."
+    }
+
+    fn parameters_schema(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "job_id": {
+                    "type": "string",
+                    "description": "The UUID of the sandbox job"
+                },
+                "limit": {
+                    "type": "integer",
+                    "description": "Maximum number of events to return (default 50, most recent)"
+                }
+            },
+            "required": ["job_id"]
+        })
+    }
+
+    async fn execute(
+        &self,
+        params: serde_json::Value,
+        _ctx: &JobContext,
+    ) -> Result<ToolOutput, ToolError> {
+        let start = std::time::Instant::now();
+
+        let job_id_str = params
+            .get("job_id")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| ToolError::InvalidParameters("missing 'job_id' parameter".into()))?;
+
+        let job_id = Uuid::parse_str(job_id_str).map_err(|_| {
+            ToolError::InvalidParameters(format!("invalid job ID format: {}", job_id_str))
+        })?;
+
+        let limit = params.get("limit").and_then(|v| v.as_u64()).unwrap_or(50) as usize;
+
+        let events =
+            self.store.list_job_events(job_id).await.map_err(|e| {
+                ToolError::ExecutionFailed(format!("failed to load job events: {}", e))
+            })?;
+
+        // Take the last `limit` events (most recent)
+        let start_idx = events.len().saturating_sub(limit);
+        let recent: Vec<serde_json::Value> = events[start_idx..]
+            .iter()
+            .map(|ev| {
+                serde_json::json!({
+                    "event_type": ev.event_type,
+                    "data": ev.data,
+                    "created_at": ev.created_at.to_rfc3339(),
+                })
+            })
+            .collect();
+
+        let result = serde_json::json!({
+            "job_id": job_id_str,
+            "total_events": events.len(),
+            "returned": recent.len(),
+            "events": recent,
+        });
+
+        Ok(ToolOutput::success(result, start.elapsed()))
+    }
+
+    fn requires_sanitization(&self) -> bool {
+        true
+    }
+}
+
+/// Tool for sending follow-up prompts to a running Claude Code sandbox job.
+///
+/// The prompt is queued and picked up by the Claude Code bridge on its next
+/// poll cycle (via `--resume`).
+pub struct JobPromptTool {
+    prompt_queue: PromptQueue,
+}
+
+/// Type alias matching `crate::channels::web::server::PromptQueue`.
+pub type PromptQueue = Arc<
+    tokio::sync::Mutex<
+        std::collections::HashMap<
+            Uuid,
+            std::collections::VecDeque<crate::orchestrator::api::PendingPrompt>,
+        >,
+    >,
+>;
+
+impl JobPromptTool {
+    pub fn new(prompt_queue: PromptQueue) -> Self {
+        Self { prompt_queue }
+    }
+}
+
+#[async_trait]
+impl Tool for JobPromptTool {
+    fn name(&self) -> &str {
+        "job_prompt"
+    }
+
+    fn description(&self) -> &str {
+        "Send a follow-up prompt to a running Claude Code sandbox job. The prompt is \
+         queued and delivered on the next poll cycle. Use this to give the sub-agent \
+         additional instructions, answer its questions, or tell it to wrap up."
+    }
+
+    fn parameters_schema(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "job_id": {
+                    "type": "string",
+                    "description": "The UUID of the running sandbox job"
+                },
+                "content": {
+                    "type": "string",
+                    "description": "The follow-up prompt text to send"
+                },
+                "done": {
+                    "type": "boolean",
+                    "description": "If true, signals the sub-agent that no more prompts are coming \
+                                    and it should finish up. Default false."
+                }
+            },
+            "required": ["job_id", "content"]
+        })
+    }
+
+    async fn execute(
+        &self,
+        params: serde_json::Value,
+        _ctx: &JobContext,
+    ) -> Result<ToolOutput, ToolError> {
+        let start = std::time::Instant::now();
+
+        let job_id_str = params
+            .get("job_id")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| ToolError::InvalidParameters("missing 'job_id' parameter".into()))?;
+
+        let job_id = Uuid::parse_str(job_id_str).map_err(|_| {
+            ToolError::InvalidParameters(format!("invalid job ID format: {}", job_id_str))
+        })?;
+
+        let content = params
+            .get("content")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| ToolError::InvalidParameters("missing 'content' parameter".into()))?;
+
+        let done = params
+            .get("done")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+
+        let prompt = crate::orchestrator::api::PendingPrompt {
+            content: content.to_string(),
+            done,
+        };
+
+        {
+            let mut queue = self.prompt_queue.lock().await;
+            queue.entry(job_id).or_default().push_back(prompt);
+        }
+
+        let result = serde_json::json!({
+            "job_id": job_id_str,
+            "status": "queued",
+            "message": format!("Prompt queued for job {}", &job_id_str[..8]),
+            "done": done,
+        });
+
+        Ok(ToolOutput::success(result, start.elapsed()))
+    }
+
+    fn requires_approval(&self) -> bool {
+        true
+    }
+
+    fn requires_sanitization(&self) -> bool {
+        false
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -809,10 +1053,6 @@ mod tests {
         let props = schema.get("properties").unwrap().as_object().unwrap();
         assert!(props.contains_key("title"));
         assert!(props.contains_key("description"));
-        assert!(
-            !props.contains_key("project_dir"),
-            "project_dir must not be exposed to the LLM"
-        );
         assert!(!props.contains_key("wait"));
         assert!(!props.contains_key("mode"));
     }
@@ -924,5 +1164,88 @@ mod tests {
             "expected 'must be under' error, got: {}",
             err
         );
+    }
+
+    #[test]
+    fn test_sandbox_schema_includes_project_dir() {
+        let manager = Arc::new(ContextManager::new(5));
+        let jm = Arc::new(ContainerJobManager::new(
+            crate::orchestrator::job_manager::ContainerJobConfig::default(),
+            crate::orchestrator::TokenStore::new(),
+        ));
+        let tool = CreateJobTool::new(manager).with_sandbox(jm, None);
+        let schema = tool.parameters_schema();
+        let props = schema.get("properties").unwrap().as_object().unwrap();
+        assert!(
+            props.contains_key("project_dir"),
+            "sandbox schema must expose project_dir"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_job_prompt_tool_queues_prompt() {
+        let queue: PromptQueue =
+            Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new()));
+        let tool = JobPromptTool::new(Arc::clone(&queue));
+
+        let job_id = Uuid::new_v4();
+        let params = serde_json::json!({
+            "job_id": job_id.to_string(),
+            "content": "What's the status?",
+            "done": false,
+        });
+
+        let ctx = JobContext::default();
+        let result = tool.execute(params, &ctx).await.unwrap();
+
+        assert_eq!(
+            result.result.get("status").unwrap().as_str().unwrap(),
+            "queued"
+        );
+
+        let q = queue.lock().await;
+        let prompts = q.get(&job_id).unwrap();
+        assert_eq!(prompts.len(), 1);
+        assert_eq!(prompts[0].content, "What's the status?");
+        assert!(!prompts[0].done);
+    }
+
+    #[tokio::test]
+    async fn test_job_prompt_tool_requires_approval() {
+        let queue: PromptQueue =
+            Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new()));
+        let tool = JobPromptTool::new(queue);
+        assert!(tool.requires_approval());
+    }
+
+    #[tokio::test]
+    async fn test_job_prompt_tool_rejects_invalid_uuid() {
+        let queue: PromptQueue =
+            Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new()));
+        let tool = JobPromptTool::new(queue);
+
+        let params = serde_json::json!({
+            "job_id": "not-a-uuid",
+            "content": "hello",
+        });
+
+        let ctx = JobContext::default();
+        let result = tool.execute(params, &ctx).await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_job_prompt_tool_rejects_missing_content() {
+        let queue: PromptQueue =
+            Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new()));
+        let tool = JobPromptTool::new(queue);
+
+        let params = serde_json::json!({
+            "job_id": Uuid::new_v4().to_string(),
+        });
+
+        let ctx = JobContext::default();
+        let result = tool.execute(params, &ctx).await;
+        assert!(result.is_err());
     }
 }

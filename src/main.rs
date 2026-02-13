@@ -973,6 +973,13 @@ async fn main() -> anyhow::Result<()> {
         Arc::clone(&context_manager),
         container_job_manager.clone(),
         store.clone(),
+        job_event_tx.clone(),
+        Some(channels.inject_sender()),
+        if config.sandbox.enabled {
+            Some(Arc::clone(&prompt_queue))
+        } else {
+            None
+        },
     );
 
     // Add web gateway channel if configured

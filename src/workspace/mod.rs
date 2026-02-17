@@ -43,8 +43,9 @@
 mod chunker;
 mod document;
 mod embeddings;
-mod logseq;
+pub mod hygiene;
 pub mod learnings;
+mod logseq;
 pub mod merge;
 #[cfg(feature = "postgres")]
 mod repository;

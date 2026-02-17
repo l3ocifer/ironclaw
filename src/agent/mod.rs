@@ -14,6 +14,7 @@ mod agent_loop;
 pub mod compaction;
 pub mod compressor;
 pub mod context_monitor;
+pub mod cost_guard;
 mod heartbeat;
 mod router;
 pub mod routine;

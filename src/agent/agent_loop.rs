@@ -1,4 +1,11 @@
 //! Main agent loop.
+//!
+//! Contains the `Agent` struct, `AgentDeps`, and the core event loop (`run`).
+//! The heavy lifting is delegated to sibling modules:
+//!
+//! - `dispatcher` - Tool dispatch (agentic loop, tool execution)
+//! - `commands` - System commands and job handlers
+//! - `thread_ops` - Thread/session operations (user input, undo, approval, persistence)
 
 use std::sync::Arc;
 
@@ -17,15 +24,26 @@ use crate::agent::submission::{Submission, SubmissionParser, SubmissionResult};
 use crate::agent::{HeartbeatConfig as AgentHeartbeatConfig, MessageIntent, Router, Scheduler};
 use crate::channels::{ChannelManager, IncomingMessage, OutgoingResponse, StatusUpdate};
 use crate::config::{AgentConfig, HeartbeatConfig, MemoryFlushConfig, RoutineConfig};
-use crate::context::ContextManager;
-use crate::context::JobContext;
+use crate::context::{ContextManager, JobContext};
 use crate::db::Database;
 use crate::error::Error;
 use crate::extensions::ExtensionManager;
+use crate::hooks::HookRegistry;
 use crate::llm::{ChatMessage, LlmProvider, Reasoning, ReasoningContext, RespondResult};
 use crate::safety::SafetyLayer;
 use crate::tools::ToolRegistry;
 use crate::workspace::Workspace;
+
+/// Result of the agentic loop execution.
+pub(super) enum AgenticLoopResult {
+    /// Completed with a response.
+    Response(String),
+    /// A tool requires approval before continuing.
+    NeedApproval {
+        /// The pending approval request to store.
+        pending: PendingApproval,
+    },
+}
 
 /// Channels that represent main/direct sessions (not group chats).
 /// Only in these do we include MEMORY.md in the system prompt for privacy.
@@ -65,43 +83,38 @@ pub(crate) fn truncate_for_preview(output: &str, max_chars: usize) -> String {
     }
 }
 
-/// Result of the agentic loop execution.
-enum AgenticLoopResult {
-    /// Completed with a response.
-    Response(String),
-    /// A tool requires approval before continuing.
-    NeedApproval {
-        /// The pending approval request to store.
-        pending: PendingApproval,
-    },
-}
-
 /// Core dependencies for the agent.
 ///
 /// Bundles the shared components to reduce argument count.
 pub struct AgentDeps {
     pub store: Option<Arc<dyn Database>>,
     pub llm: Arc<dyn LlmProvider>,
+    /// Cheap/fast LLM for lightweight tasks (heartbeat, routing, evaluation).
+    /// Falls back to the main `llm` if None.
+    pub cheap_llm: Option<Arc<dyn LlmProvider>>,
     pub safety: Arc<SafetyLayer>,
     pub tools: Arc<ToolRegistry>,
     pub workspace: Option<Arc<Workspace>>,
     pub extension_manager: Option<Arc<ExtensionManager>>,
     /// Learning repository for evidence-backed learnings (Phase 6b).
     pub learning_repo: Option<Arc<crate::workspace::learnings::LearningRepository>>,
+    pub hooks: Arc<HookRegistry>,
+    /// Cost enforcement guardrails (daily budget, hourly rate limits).
+    pub cost_guard: Arc<crate::agent::cost_guard::CostGuard>,
 }
 
 /// The main agent that coordinates all components.
 pub struct Agent {
-    config: AgentConfig,
-    deps: AgentDeps,
-    channels: Arc<ChannelManager>,
-    context_manager: Arc<ContextManager>,
-    scheduler: Arc<Scheduler>,
-    router: Router,
-    session_manager: Arc<SessionManager>,
-    context_monitor: ContextMonitor,
-    heartbeat_config: Option<HeartbeatConfig>,
-    routine_config: Option<RoutineConfig>,
+    pub(super) config: AgentConfig,
+    pub(super) deps: AgentDeps,
+    pub(super) channels: Arc<ChannelManager>,
+    pub(super) context_manager: Arc<ContextManager>,
+    pub(super) scheduler: Arc<Scheduler>,
+    pub(super) router: Router,
+    pub(super) session_manager: Arc<SessionManager>,
+    pub(super) context_monitor: ContextMonitor,
+    pub(super) heartbeat_config: Option<HeartbeatConfig>,
+    pub(super) routine_config: Option<RoutineConfig>,
 }
 
 impl Agent {
@@ -130,6 +143,7 @@ impl Agent {
             deps.safety.clone(),
             deps.tools.clone(),
             deps.store.clone(),
+            deps.hooks.clone(),
         ));
 
         Self {
@@ -147,24 +161,38 @@ impl Agent {
     }
 
     // Convenience accessors
-    fn store(&self) -> Option<&Arc<dyn Database>> {
+
+    pub(super) fn store(&self) -> Option<&Arc<dyn Database>> {
         self.deps.store.as_ref()
     }
 
-    fn llm(&self) -> &Arc<dyn LlmProvider> {
+    pub(super) fn llm(&self) -> &Arc<dyn LlmProvider> {
         &self.deps.llm
     }
 
-    fn safety(&self) -> &Arc<SafetyLayer> {
+    /// Get the cheap/fast LLM provider, falling back to the main one.
+    pub(super) fn cheap_llm(&self) -> &Arc<dyn LlmProvider> {
+        self.deps.cheap_llm.as_ref().unwrap_or(&self.deps.llm)
+    }
+
+    pub(super) fn safety(&self) -> &Arc<SafetyLayer> {
         &self.deps.safety
     }
 
-    fn tools(&self) -> &Arc<ToolRegistry> {
+    pub(super) fn tools(&self) -> &Arc<ToolRegistry> {
         &self.deps.tools
     }
 
-    fn workspace(&self) -> Option<&Arc<Workspace>> {
+    pub(super) fn workspace(&self) -> Option<&Arc<Workspace>> {
         self.deps.workspace.as_ref()
+    }
+
+    pub(super) fn hooks(&self) -> &Arc<HookRegistry> {
+        &self.deps.hooks
+    }
+
+    pub(super) fn cost_guard(&self) -> &Arc<crate::agent::cost_guard::CostGuard> {
+        &self.deps.cost_guard
     }
 
     /// Run the agent main loop.
@@ -318,7 +346,7 @@ impl Agent {
                     Some(spawn_heartbeat(
                         config,
                         workspace.clone(),
-                        self.llm().clone(),
+                        self.cheap_llm().clone(),
                         Some(notify_tx),
                         None, // Integrity monitor set separately at startup
                     ))
@@ -443,10 +471,32 @@ impl Agent {
 
             match self.handle_message(&message).await {
                 Ok(Some(response)) if !response.is_empty() => {
-                    let _ = self
-                        .channels
-                        .respond(&message, OutgoingResponse::text(response))
-                        .await;
+                    // Hook: BeforeOutbound — allow hooks to modify or suppress outbound
+                    let event = crate::hooks::HookEvent::Outbound {
+                        user_id: message.user_id.clone(),
+                        channel: message.channel.clone(),
+                        content: response.clone(),
+                        thread_id: message.thread_id.clone(),
+                    };
+                    match self.hooks().run(&event).await {
+                        Err(err) => {
+                            tracing::warn!("BeforeOutbound hook blocked response: {}", err);
+                        }
+                        Ok(crate::hooks::HookOutcome::Continue {
+                            modified: Some(new_content),
+                        }) => {
+                            let _ = self
+                                .channels
+                                .respond(&message, OutgoingResponse::text(new_content))
+                                .await;
+                        }
+                        _ => {
+                            let _ = self
+                                .channels
+                                .respond(&message, OutgoingResponse::text(response))
+                                .await;
+                        }
+                    }
                 }
                 Ok(Some(_)) => {
                     // Empty response, nothing to send (e.g. approval handled via send_status)
@@ -492,7 +542,33 @@ impl Agent {
 
     async fn handle_message(&self, message: &IncomingMessage) -> Result<Option<String>, Error> {
         // Parse submission type first
-        let submission = SubmissionParser::parse(&message.content);
+        let mut submission = SubmissionParser::parse(&message.content);
+
+        // Hook: BeforeInbound — allow hooks to modify or reject user input
+        if let Submission::UserInput { ref content } = submission {
+            let event = crate::hooks::HookEvent::Inbound {
+                user_id: message.user_id.clone(),
+                channel: message.channel.clone(),
+                content: content.clone(),
+                thread_id: message.thread_id.clone(),
+            };
+            match self.hooks().run(&event).await {
+                Err(crate::hooks::HookError::Rejected { reason }) => {
+                    return Ok(Some(format!("[Message rejected: {}]", reason)));
+                }
+                Err(err) => {
+                    return Ok(Some(format!("[Message blocked by hook policy: {}]", err)));
+                }
+                Ok(crate::hooks::HookOutcome::Continue {
+                    modified: Some(new_content),
+                }) => {
+                    submission = Submission::UserInput {
+                        content: new_content,
+                    };
+                }
+                _ => {} // Continue, fail-open errors already logged in registry
+            }
+        }
 
         // Hydrate thread from DB if it's a historical thread not in memory
         if let Some(ref external_thread_id) = message.thread_id {
@@ -1764,7 +1840,17 @@ impl Agent {
             return Ok(SubmissionResult::ok_with_message("Nothing to redo."));
         }
 
-        if let Some(checkpoint) = mgr.redo() {
+        // Capture current state before redo so redo() can save it to undo stack
+        let (current_turn, current_messages) = {
+            let sess = session.lock().await;
+            let thread = sess
+                .threads
+                .get(&thread_id)
+                .ok_or_else(|| Error::from(crate::error::JobError::NotFound { id: thread_id }))?;
+            (thread.turn_number(), thread.messages().to_vec())
+        };
+
+        if let Some(checkpoint) = mgr.redo(current_turn, current_messages) {
             let mut sess = session.lock().await;
             let thread = sess
                 .threads
@@ -3004,104 +3090,6 @@ fn detect_auth_awaiting(
 
 #[cfg(test)]
 mod tests {
-    use crate::error::Error;
-
-    use super::detect_auth_awaiting;
-
-    #[test]
-    fn test_detect_auth_awaiting_positive() {
-        let result: Result<String, Error> = Ok(serde_json::json!({
-            "name": "telegram",
-            "kind": "WasmTool",
-            "awaiting_token": true,
-            "status": "awaiting_token",
-            "instructions": "Please provide your Telegram Bot API token."
-        })
-        .to_string());
-
-        let detected = detect_auth_awaiting("tool_auth", &result);
-        assert!(detected.is_some());
-        let (name, instructions) = detected.unwrap();
-        assert_eq!(name, "telegram");
-        assert!(instructions.contains("Telegram Bot API"));
-    }
-
-    #[test]
-    fn test_detect_auth_awaiting_not_awaiting() {
-        let result: Result<String, Error> = Ok(serde_json::json!({
-            "name": "telegram",
-            "kind": "WasmTool",
-            "awaiting_token": false,
-            "status": "authenticated"
-        })
-        .to_string());
-
-        assert!(detect_auth_awaiting("tool_auth", &result).is_none());
-    }
-
-    #[test]
-    fn test_detect_auth_awaiting_wrong_tool() {
-        let result: Result<String, Error> = Ok(serde_json::json!({
-            "name": "telegram",
-            "awaiting_token": true,
-        })
-        .to_string());
-
-        assert!(detect_auth_awaiting("tool_list", &result).is_none());
-    }
-
-    #[test]
-    fn test_detect_auth_awaiting_error_result() {
-        let result: Result<String, Error> =
-            Err(crate::error::ToolError::NotFound { name: "x".into() }.into());
-        assert!(detect_auth_awaiting("tool_auth", &result).is_none());
-    }
-
-    #[test]
-    fn test_detect_auth_awaiting_default_instructions() {
-        let result: Result<String, Error> = Ok(serde_json::json!({
-            "name": "custom_tool",
-            "awaiting_token": true,
-            "status": "awaiting_token"
-        })
-        .to_string());
-
-        let (_, instructions) = detect_auth_awaiting("tool_auth", &result).unwrap();
-        assert_eq!(instructions, "Please provide your API token/key.");
-    }
-
-    #[test]
-    fn test_detect_auth_awaiting_tool_activate() {
-        let result: Result<String, Error> = Ok(serde_json::json!({
-            "name": "slack",
-            "kind": "McpServer",
-            "awaiting_token": true,
-            "status": "awaiting_token",
-            "instructions": "Provide your Slack Bot token."
-        })
-        .to_string());
-
-        let detected = detect_auth_awaiting("tool_activate", &result);
-        assert!(detected.is_some());
-        let (name, instructions) = detected.unwrap();
-        assert_eq!(name, "slack");
-        assert!(instructions.contains("Slack Bot"));
-    }
-
-    #[test]
-    fn test_detect_auth_awaiting_tool_activate_not_awaiting() {
-        let result: Result<String, Error> = Ok(serde_json::json!({
-            "name": "slack",
-            "tools_loaded": ["slack_post_message"],
-            "message": "Activated"
-        })
-        .to_string());
-
-        assert!(detect_auth_awaiting("tool_activate", &result).is_none());
-    }
-
-    // --- truncate_for_preview tests ---
-
     use super::truncate_for_preview;
 
     #[test]

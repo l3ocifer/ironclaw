@@ -3,6 +3,5 @@ kind: ConfigMap
 metadata:
   name: ironclaw-config
 data:
-  DATABASE_URL: ""
   OLLAMA_BASE_URL: "http://external-ollama.ironclaw.svc.cluster.local:11434"
   MCP_SERVER_URL: "http://external-mcp.ironclaw.svc.cluster.local:8890"

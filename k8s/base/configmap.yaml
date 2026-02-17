@@ -4,9 +4,11 @@ metadata:
   name: ironclaw-config
 data:
   RUST_LOG: "ironclaw=info"
+  DATABASE_BACKEND: "postgres"
   AGENT_NAME: "Frick"
   AGENT_ID: "frick"
   # Gateway (web UI + API)
+  GATEWAY_ENABLED: "true"
   GATEWAY_HOST: "0.0.0.0"
   GATEWAY_PORT: "3000"
   # Ollama on host (bare metal) — exposed as K8s service

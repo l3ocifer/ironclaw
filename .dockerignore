@@ -4,5 +4,6 @@ target/
 .env.*
 *.md
 !CLAUDE.md
+!skills/**
 node_modules/
 tools-src/

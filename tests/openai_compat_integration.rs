@@ -114,6 +114,7 @@ async fn start_test_server() -> (SocketAddr, Arc<GatewayState>) {
         ws_tracker: Some(Arc::new(WsConnectionTracker::new())),
         llm_provider: Some(Arc::new(MockLlmProvider)),
         chat_rate_limiter: ironclaw::channels::web::server::RateLimiter::new(30, 60),
+        agent_card_json: None,
     });
 
     let addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
@@ -434,6 +435,7 @@ async fn test_no_llm_provider_returns_503() {
         ws_tracker: Some(Arc::new(WsConnectionTracker::new())),
         llm_provider: None, // No LLM!
         chat_rate_limiter: ironclaw::channels::web::server::RateLimiter::new(30, 60),
+        agent_card_json: None,
     });
 
     let addr: SocketAddr = "127.0.0.1:0".parse().unwrap();

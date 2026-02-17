@@ -53,6 +53,7 @@ async fn start_test_server() -> (
         ws_tracker: Some(Arc::new(WsConnectionTracker::new())),
         llm_provider: None,
         chat_rate_limiter: ironclaw::channels::web::server::RateLimiter::new(30, 60),
+        agent_card_json: None,
     });
 
     let addr: SocketAddr = "127.0.0.1:0".parse().unwrap();

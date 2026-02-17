@@ -22,6 +22,8 @@ COPY Cargo.toml Cargo.lock ./
 COPY src/ src/
 COPY migrations/ migrations/
 COPY wit/ wit/
+COPY vendor/ vendor/
+COPY skills/ skills/
 
 RUN cargo build --release --bin ironclaw
 
@@ -38,6 +40,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY --from=builder /app/target/release/ironclaw /usr/local/bin/ironclaw
 COPY --from=builder /usr/local/bin/tilth /usr/local/bin/tilth
 COPY --from=builder /app/migrations /app/migrations
+COPY --from=builder /app/skills /usr/local/bin/skills
 
 # Non-root user
 RUN useradd -m -u 1000 -s /bin/bash ironclaw

@@ -275,6 +275,32 @@ impl WorkspaceStorage {
     }
 }
 
+/// Maximum characters per file loaded into the bootstrap system prompt.
+/// Files exceeding this are truncated with a 70/20/10 head/tail split.
+/// ~20K chars ≈ ~5K tokens — leaves room for multiple files in context.
+const BOOTSTRAP_FILE_BUDGET: usize = 20_000;
+
+/// Truncate content for bootstrap injection using a 70/20/10 head/tail split.
+///
+/// If `content` fits within `budget`, returns it unchanged.
+/// Otherwise: 70% from the head, 20% from the tail, 10% for the marker.
+/// This preserves the most important parts (beginning = structure/identity,
+/// end = recent entries) while cutting the stale middle.
+fn truncate_bootstrap(content: &str, budget: usize) -> String {
+    if content.len() <= budget {
+        return content.to_string();
+    }
+    let head_budget = budget * 70 / 100;
+    let tail_budget = budget * 20 / 100;
+    let head = &content[..head_budget];
+    let tail = &content[content.len().saturating_sub(tail_budget)..];
+    let cut_chars = content.len() - head_budget - tail_budget;
+    format!(
+        "{}\n\n[...{} characters truncated...]\n\n{}",
+        head, cut_chars, tail
+    )
+}
+
 /// Default template seeded into HEARTBEAT.md on first access.
 ///
 /// Intentionally comment-only so the heartbeat runner treats it as
@@ -661,6 +687,9 @@ impl Workspace {
     ///
     /// `learnings_context` is a pre-formatted string of active learnings.
     /// Only injected in main sessions (same privacy scope as MEMORY.md).
+    ///
+    /// Files exceeding `BOOTSTRAP_FILE_BUDGET` chars are truncated using a 70/20/10
+    /// head/tail split: 70% from the head, 20% from the tail, middle cut with marker.
     pub async fn system_prompt_with_learnings(
         &self,
         include_memory: bool,
@@ -681,7 +710,8 @@ impl Workspace {
             if let Ok(doc) = self.read(path).await
                 && !doc.content.is_empty()
             {
-                parts.push(format!("{}\n\n{}", header, doc.content));
+                let content = truncate_bootstrap(&doc.content, BOOTSTRAP_FILE_BUDGET);
+                parts.push(format!("{}\n\n{}", header, content));
             }
         }
 
@@ -698,7 +728,8 @@ impl Workspace {
                 } else {
                     "## Yesterday's Notes"
                 };
-                parts.push(format!("{}\n\n{}", header, doc.content));
+                let content = truncate_bootstrap(&doc.content, BOOTSTRAP_FILE_BUDGET);
+                parts.push(format!("{}\n\n{}", header, content));
             }
         }
 
@@ -710,7 +741,8 @@ impl Workspace {
             }
             if let Ok(doc) = self.read(paths::MEMORY).await {
                 if !doc.content.is_empty() {
-                    memory_parts.push(doc.content);
+                    let content = truncate_bootstrap(&doc.content, BOOTSTRAP_FILE_BUDGET);
+                    memory_parts.push(content);
                 }
             }
             if !memory_parts.is_empty() {

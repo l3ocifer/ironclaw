@@ -1233,6 +1233,10 @@ pub struct HeartbeatConfig {
     pub notify_channel: Option<String>,
     /// User ID to notify on heartbeat findings.
     pub notify_user: Option<String>,
+    /// Quiet hours start (0-23, local time). Heartbeat skips during these hours.
+    pub quiet_hours_start: Option<u8>,
+    /// Quiet hours end (0-23, local time).
+    pub quiet_hours_end: Option<u8>,
 }
 
 impl Default for HeartbeatConfig {
@@ -1242,6 +1246,8 @@ impl Default for HeartbeatConfig {
             interval_secs: 1800, // 30 minutes
             notify_channel: None,
             notify_user: None,
+            quiet_hours_start: None,
+            quiet_hours_end: None,
         }
     }
 }
@@ -1269,6 +1275,8 @@ impl HeartbeatConfig {
                 .or_else(|| settings.heartbeat.notify_channel.clone()),
             notify_user: optional_env("HEARTBEAT_NOTIFY_USER")?
                 .or_else(|| settings.heartbeat.notify_user.clone()),
+            quiet_hours_start: settings.heartbeat.quiet_hours_start.filter(|&h| h < 24),
+            quiet_hours_end: settings.heartbeat.quiet_hours_end.filter(|&h| h < 24),
         })
     }
 }

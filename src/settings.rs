@@ -401,6 +401,15 @@ pub struct HeartbeatSettings {
     /// User ID to notify on heartbeat findings.
     #[serde(default)]
     pub notify_user: Option<String>,
+
+    /// Quiet hours start (0-23, local time). Heartbeat skips during quiet hours
+    /// unless an urgent check triggers. Default: None (always active).
+    #[serde(default)]
+    pub quiet_hours_start: Option<u8>,
+
+    /// Quiet hours end (0-23, local time). Default: None.
+    #[serde(default)]
+    pub quiet_hours_end: Option<u8>,
 }
 
 fn default_heartbeat_interval() -> u64 {
@@ -414,6 +423,8 @@ impl Default for HeartbeatSettings {
             interval_secs: default_heartbeat_interval(),
             notify_channel: None,
             notify_user: None,
+            quiet_hours_start: None,
+            quiet_hours_end: None,
         }
     }
 }

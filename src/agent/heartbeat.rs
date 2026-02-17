@@ -26,6 +26,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use chrono::Timelike;
 use tokio::sync::{mpsc, Mutex};
 
 use crate::channels::OutgoingResponse;
@@ -46,6 +47,10 @@ pub struct HeartbeatConfig {
     pub notify_user_id: Option<String>,
     /// Channel to notify on heartbeat findings.
     pub notify_channel: Option<String>,
+    /// Quiet hours start (0-23, local time). Heartbeat skips during these hours.
+    pub quiet_hours_start: Option<u8>,
+    /// Quiet hours end (0-23, local time).
+    pub quiet_hours_end: Option<u8>,
 }
 
 impl Default for HeartbeatConfig {
@@ -56,6 +61,8 @@ impl Default for HeartbeatConfig {
             max_failures: 3,
             notify_user_id: None,
             notify_channel: None,
+            quiet_hours_start: None,
+            quiet_hours_end: None,
         }
     }
 }
@@ -155,6 +162,11 @@ impl HeartbeatRunner {
         loop {
             interval.tick().await;
 
+            if self.is_quiet_hours() {
+                tracing::debug!("Heartbeat skipped: quiet hours");
+                continue;
+            }
+
             match self.check_heartbeat().await {
                 HeartbeatResult::Ok => {
                     tracing::debug!("Heartbeat OK");
@@ -181,6 +193,21 @@ impl HeartbeatRunner {
                     }
                 }
             }
+        }
+    }
+
+    /// Check if current local time falls within configured quiet hours.
+    fn is_quiet_hours(&self) -> bool {
+        let (Some(start), Some(end)) = (self.config.quiet_hours_start, self.config.quiet_hours_end) else {
+            return false;
+        };
+        let now_hour = chrono::Local::now().hour() as u8;
+        if start <= end {
+            // Simple range: e.g., 23..7 doesn't apply, but 9..17 does
+            now_hour >= start && now_hour < end
+        } else {
+            // Wraps midnight: e.g., 23..7 means 23,0,1,2,3,4,5,6
+            now_hour >= start || now_hour < end
         }
     }
 

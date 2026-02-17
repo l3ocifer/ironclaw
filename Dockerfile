@@ -25,6 +25,9 @@ COPY wit/ wit/
 COPY vendor/ vendor/
 COPY skills/ skills/
 
+# Cargo validates all manifest targets; create stubs for examples we don't ship.
+RUN mkdir -p examples && echo 'fn main(){}' > examples/test_heartbeat.rs
+
 RUN cargo build --release --bin ironclaw
 
 # Install tilth (AST-aware code intelligence for agents)

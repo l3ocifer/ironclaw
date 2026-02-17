@@ -554,3 +554,80 @@ impl Tool for TaskExportTool {
         false
     }
 }
+
+// ---------------------------------------------------------------------------
+// task_archive
+// ---------------------------------------------------------------------------
+
+/// Tool for archiving old completed/failed/cancelled tasks (memory decay).
+pub struct TaskArchiveTool {
+    repo: Arc<TaskRepository>,
+    user_id: String,
+}
+
+impl TaskArchiveTool {
+    pub fn new(repo: Arc<TaskRepository>, user_id: String) -> Self {
+        Self { repo, user_id }
+    }
+}
+
+#[async_trait]
+impl Tool for TaskArchiveTool {
+    fn name(&self) -> &str {
+        "task_archive"
+    }
+
+    fn description(&self) -> &str {
+        "Archive completed, failed, and cancelled tasks older than a retention period. \
+         Returns a compact summary of archived tasks. This frees context window space \
+         by removing old terminal tasks from the active task graph."
+    }
+
+    fn parameters_schema(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "retention_days": {
+                    "type": "integer",
+                    "description": "Archive tasks older than this many days (default: 7)",
+                    "default": 7
+                }
+            }
+        })
+    }
+
+    async fn execute(
+        &self,
+        params: serde_json::Value,
+        _ctx: &JobContext,
+    ) -> Result<ToolOutput, ToolError> {
+        let start = std::time::Instant::now();
+
+        let retention_days = params
+            .get("retention_days")
+            .and_then(|v| v.as_i64())
+            .unwrap_or(7) as i32;
+
+        let (summary, count) = self
+            .repo
+            .archive_completed_tasks(&self.user_id, retention_days)
+            .await
+            .map_err(|e| ToolError::ExecutionFailed(format!("Failed to archive tasks: {e}")))?;
+
+        if count == 0 {
+            return Ok(ToolOutput::text(
+                &format!("No tasks older than {retention_days} days to archive."),
+                start.elapsed(),
+            ));
+        }
+
+        Ok(ToolOutput::text(
+            &format!("Archived {count} tasks.\n\n{summary}"),
+            start.elapsed(),
+        ))
+    }
+
+    fn requires_sanitization(&self) -> bool {
+        false
+    }
+}

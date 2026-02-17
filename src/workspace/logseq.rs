@@ -38,6 +38,17 @@ pub fn load_logseq_context(config: &LogseqConfig, agent_name: &str) -> String {
         }
     }
 
+    // Shared voice & craft directives.
+    if config.include_voice {
+        let rel = Path::new("pages")
+            .join(&config.ai_namespace)
+            .join("shared")
+            .join("voice.md");
+        if let Some(s) = read_file_under(&graph_path, &rel, 1500) {
+            parts.push(format!("## Voice & Craft\n\n{}", s));
+        }
+    }
+
     // Agent-specific preferences and decisions (use agent_name from config).
     if config.include_preferences {
         let rel = Path::new("pages")

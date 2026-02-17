@@ -500,4 +500,41 @@ impl Repository {
             })
             .collect())
     }
+
+    /// Check if a document with the given content hash exists for this user.
+    pub async fn has_content_hash(
+        &self,
+        user_id: &str,
+        content_hash: &str,
+    ) -> Result<bool, WorkspaceError> {
+        let conn = self.conn().await?;
+        let row = conn
+            .query_opt(
+                "SELECT 1 FROM memory_documents WHERE user_id = $1 AND content_hash = $2 LIMIT 1",
+                &[&user_id, &content_hash],
+            )
+            .await
+            .map_err(|e| WorkspaceError::SearchFailed {
+                reason: format!("Content hash lookup failed: {}", e),
+            })?;
+        Ok(row.is_some())
+    }
+
+    /// Set the content hash for a document.
+    pub async fn set_content_hash(
+        &self,
+        doc_id: Uuid,
+        content_hash: &str,
+    ) -> Result<(), WorkspaceError> {
+        let conn = self.conn().await?;
+        conn.execute(
+            "UPDATE memory_documents SET content_hash = $2 WHERE id = $1",
+            &[&doc_id, &content_hash],
+        )
+        .await
+        .map_err(|e| WorkspaceError::SearchFailed {
+            reason: format!("Content hash update failed: {}", e),
+        })?;
+        Ok(())
+    }
 }

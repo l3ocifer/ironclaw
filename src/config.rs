@@ -41,6 +41,7 @@ pub struct Config {
     pub claude_code: ClaudeCodeConfig,
     pub identity: IdentityConfig,
     pub skills: SkillsConfig,
+    pub router: crate::llm::router::RouterConfig,
 }
 
 impl Config {
@@ -101,6 +102,7 @@ impl Config {
             claude_code: ClaudeCodeConfig::resolve()?,
             identity: IdentityConfig::resolve(settings)?,
             skills: SkillsConfig::resolve(settings)?,
+            router: resolve_router_config(settings)?,
         })
     }
 }
@@ -275,6 +277,8 @@ pub enum LlmBackend {
     OpenAi,
     /// Direct Anthropic API
     Anthropic,
+    /// Google Gemini API
+    Gemini,
     /// Local Ollama instance
     Ollama,
     /// Any OpenAI-compatible endpoint (e.g. vLLM, LiteLLM, Together)
@@ -289,10 +293,11 @@ impl std::str::FromStr for LlmBackend {
             "nearai" | "near_ai" | "near" => Ok(Self::NearAi),
             "openai" | "open_ai" => Ok(Self::OpenAi),
             "anthropic" | "claude" => Ok(Self::Anthropic),
+            "gemini" | "google" => Ok(Self::Gemini),
             "ollama" => Ok(Self::Ollama),
             "openai_compatible" | "openai-compatible" | "compatible" => Ok(Self::OpenAiCompatible),
             _ => Err(format!(
-                "invalid LLM backend '{}', expected one of: nearai, openai, anthropic, ollama, openai_compatible",
+                "invalid LLM backend '{}', expected one of: nearai, openai, anthropic, gemini, ollama, openai_compatible",
                 s
             )),
         }
@@ -305,6 +310,7 @@ impl std::fmt::Display for LlmBackend {
             Self::NearAi => write!(f, "nearai"),
             Self::OpenAi => write!(f, "openai"),
             Self::Anthropic => write!(f, "anthropic"),
+            Self::Gemini => write!(f, "gemini"),
             Self::Ollama => write!(f, "ollama"),
             Self::OpenAiCompatible => write!(f, "openai_compatible"),
         }
@@ -321,6 +327,13 @@ pub struct OpenAiDirectConfig {
 /// Configuration for direct Anthropic API access.
 #[derive(Debug, Clone)]
 pub struct AnthropicDirectConfig {
+    pub api_key: SecretString,
+    pub model: String,
+}
+
+/// Configuration for Google Gemini API.
+#[derive(Debug, Clone)]
+pub struct GeminiConfig {
     pub api_key: SecretString,
     pub model: String,
 }
@@ -354,6 +367,8 @@ pub struct LlmConfig {
     pub openai: Option<OpenAiDirectConfig>,
     /// Direct Anthropic config (populated when backend=anthropic)
     pub anthropic: Option<AnthropicDirectConfig>,
+    /// Google Gemini config (populated when backend=gemini)
+    pub gemini: Option<GeminiConfig>,
     /// Ollama config (populated when backend=ollama)
     pub ollama: Option<OllamaConfig>,
     /// OpenAI-compatible config (populated when backend=openai_compatible)
@@ -390,7 +405,7 @@ impl std::str::FromStr for NearAiApiMode {
 /// NEAR AI chat-api configuration.
 #[derive(Debug, Clone)]
 pub struct NearAiConfig {
-    /// Model to use (e.g., "claude-3-5-sonnet-20241022", "gpt-4o")
+    /// Model to use (e.g., "claude-opus-4.6", "gpt-5.3-codex")
     pub model: String,
     /// Base URL for the NEAR AI API (default: https://api.near.ai)
     pub base_url: String,
@@ -479,7 +494,7 @@ impl LlmConfig {
                     key: "OPENAI_API_KEY".to_string(),
                     hint: "Set OPENAI_API_KEY when LLM_BACKEND=openai".to_string(),
                 })?;
-            let model = optional_env("OPENAI_MODEL")?.unwrap_or_else(|| "gpt-4o".to_string());
+            let model = optional_env("OPENAI_MODEL")?.unwrap_or_else(|| "gpt-5.3-codex".to_string());
             Some(OpenAiDirectConfig { api_key, model })
         } else {
             None
@@ -499,11 +514,26 @@ impl LlmConfig {
             None
         };
 
+        let gemini = if backend == LlmBackend::Gemini {
+            let api_key = optional_env("GEMINI_API_KEY")?
+                .map(SecretString::from)
+                .ok_or_else(|| ConfigError::MissingRequired {
+                    key: "GEMINI_API_KEY".to_string(),
+                    hint: "Set GEMINI_API_KEY when LLM_BACKEND=gemini".to_string(),
+                })?;
+            let model = optional_env("GEMINI_MODEL")?
+                .unwrap_or_else(|| "gemini-2.5-pro".to_string());
+            Some(GeminiConfig { api_key, model })
+        } else {
+            None
+        };
+
         let ollama = if backend == LlmBackend::Ollama {
             let base_url = optional_env("OLLAMA_BASE_URL")?
                 .or_else(|| settings.ollama_base_url.clone())
                 .unwrap_or_else(|| "http://localhost:11434".to_string());
-            let model = optional_env("OLLAMA_MODEL")?.unwrap_or_else(|| "llama3".to_string());
+            let model = optional_env("OLLAMA_MODEL")?
+                .unwrap_or_else(|| "qwen3-coder:30b".to_string());
             Some(OllamaConfig { base_url, model })
         } else {
             None
@@ -532,6 +562,7 @@ impl LlmConfig {
             nearai,
             openai,
             anthropic,
+            gemini,
             ollama,
             openai_compatible,
         })
@@ -789,6 +820,7 @@ pub struct LogseqConfig {
     pub include_user_profile: bool,
     pub include_preferences: bool,
     pub include_decisions: bool,
+    pub include_voice: bool,
 }
 
 impl AgentConfig {
@@ -896,6 +928,7 @@ impl AgentConfig {
                             include_user_profile: l.include_user_profile,
                             include_preferences: l.include_preferences,
                             include_decisions: l.include_decisions,
+                            include_voice: l.include_voice,
                         })
                     }
                 })
@@ -1497,6 +1530,7 @@ pub async fn inject_llm_keys_from_secrets(
     let mappings = [
         ("llm_openai_api_key", "OPENAI_API_KEY"),
         ("llm_anthropic_api_key", "ANTHROPIC_API_KEY"),
+        ("llm_gemini_api_key", "GEMINI_API_KEY"),
         ("llm_compatible_api_key", "LLM_API_KEY"),
     ];
 
@@ -1688,4 +1722,45 @@ where
         })
         .transpose()
         .map(|opt| opt.unwrap_or(default))
+}
+
+fn resolve_router_config(
+    settings: &Settings,
+) -> Result<crate::llm::router::RouterConfig, ConfigError> {
+    use crate::llm::router::{RouterConfig, RoutingProfile};
+
+    let mut config = RouterConfig::default();
+
+    // Routing profile: env > settings > default (auto)
+    if let Some(profile_str) = optional_env("ROUTING_PROFILE")? {
+        config.profile = profile_str.parse::<RoutingProfile>().map_err(|e| {
+            ConfigError::InvalidValue {
+                key: "ROUTING_PROFILE".to_string(),
+                message: e,
+            }
+        })?;
+    } else if let Some(ref p) = settings.routing_profile {
+        config.profile = p.parse::<RoutingProfile>().map_err(|e| {
+            ConfigError::InvalidValue {
+                key: "routing_profile".to_string(),
+                message: e,
+            }
+        })?;
+    }
+
+    // Force agentic: env > settings > default (false)
+    if let Some(force) = optional_env("ROUTING_FORCE_AGENTIC")? {
+        config.force_agentic = force == "true" || force == "1";
+    } else if let Some(force) = settings.routing_force_agentic {
+        config.force_agentic = force;
+    }
+
+    // Session pinning: env > settings > default (true)
+    if let Some(pin) = optional_env("ROUTING_SESSION_PINNING")? {
+        config.session_pinning = pin != "false" && pin != "0";
+    } else if let Some(pin) = settings.routing_session_pinning {
+        config.session_pinning = pin;
+    }
+
+    Ok(config)
 }

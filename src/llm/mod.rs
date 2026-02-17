@@ -4,7 +4,8 @@
 //! - **NEAR AI** (default): Session-based or API key auth via NEAR AI proxy
 //! - **OpenAI**: Direct API access with your own key
 //! - **Anthropic**: Direct API access with your own key
-//! - **Ollama**: Local model inference
+//! - **Gemini**: Google Gemini API access
+//! - **Ollama**: Local model inference (default for self-hosted deployments)
 //! - **OpenAI-compatible**: Any endpoint that speaks the OpenAI API
 
 mod costs;
@@ -15,6 +16,7 @@ mod provider;
 mod reasoning;
 mod retry;
 mod rig_adapter;
+pub mod router;
 pub mod session;
 
 pub use failover::FailoverProvider;
@@ -29,6 +31,7 @@ pub use reasoning::{
     ToolSelection,
 };
 pub use rig_adapter::RigAdapter;
+pub use router::{Router, RouterConfig, RoutingDecision, RoutingProfile, Tier};
 pub use session::{SessionConfig, SessionManager, create_session_manager};
 
 use std::sync::Arc;
@@ -52,6 +55,7 @@ pub fn create_llm_provider(
         LlmBackend::NearAi => create_llm_provider_with_config(&config.nearai, session),
         LlmBackend::OpenAi => create_openai_provider(config),
         LlmBackend::Anthropic => create_anthropic_provider(config),
+        LlmBackend::Gemini => create_gemini_provider(config),
         LlmBackend::Ollama => create_ollama_provider(config),
         LlmBackend::OpenAiCompatible => create_openai_compatible_provider(config),
     }
@@ -122,6 +126,24 @@ fn create_anthropic_provider(config: &LlmConfig) -> Result<Arc<dyn LlmProvider>,
     let model = client.completion_model(&anth.model);
     tracing::info!("Using Anthropic direct API (model: {})", anth.model);
     Ok(Arc::new(RigAdapter::new(model, &anth.model)))
+}
+
+fn create_gemini_provider(config: &LlmConfig) -> Result<Arc<dyn LlmProvider>, LlmError> {
+    let gem = config.gemini.as_ref().ok_or_else(|| LlmError::AuthFailed {
+        provider: "gemini".to_string(),
+    })?;
+
+    use rig::providers::gemini;
+
+    let client: gemini::Client =
+        gemini::Client::new(gem.api_key.expose_secret()).map_err(|e| LlmError::RequestFailed {
+            provider: "gemini".to_string(),
+            reason: format!("Failed to create Gemini client: {}", e),
+        })?;
+
+    let model = client.completion_model(&gem.model);
+    tracing::info!("Using Google Gemini API (model: {})", gem.model);
+    Ok(Arc::new(RigAdapter::new(model, &gem.model)))
 }
 
 fn create_ollama_provider(config: &LlmConfig) -> Result<Arc<dyn LlmProvider>, LlmError> {

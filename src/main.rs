@@ -606,8 +606,14 @@ async fn main() -> anyhow::Result<()> {
             tools.register_task_tools(
                 task_repo,
                 config.agent.agent_id.clone(),
-                task_user_id,
+                task_user_id.clone(),
             );
+
+            // Register learning tools for evidence-backed learnings system
+            let learning_repo = Arc::new(
+                ironclaw::workspace::learnings::LearningRepository::new(pool.clone()),
+            );
+            tools.register_learning_tools(learning_repo);
         }
     }
 
@@ -827,6 +833,14 @@ async fn main() -> anyhow::Result<()> {
         tracing::info!(
             "Local tools enabled (allow_local_tools=true), dev tools registered directly"
         );
+    }
+
+    // Register AST-aware code intelligence tools (tilth).
+    // Uses current working directory as default scope for code navigation.
+    {
+        let scope = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+        let tilth_state = ironclaw::tools::builtin::TilthState::new(scope);
+        tools.register_code_tools(tilth_state);
     }
 
     // Shared state for job events (used by both orchestrator and web gateway)
@@ -1203,6 +1217,14 @@ async fn main() -> anyhow::Result<()> {
         channels.add(Box::new(gw));
     }
 
+    // Create learning repository for the agent (if PostgreSQL available)
+    #[cfg(feature = "postgres")]
+    let learning_repo = pg_pool.as_ref().map(|pool| {
+        Arc::new(ironclaw::workspace::learnings::LearningRepository::new(pool.clone()))
+    });
+    #[cfg(not(feature = "postgres"))]
+    let learning_repo: Option<Arc<ironclaw::workspace::learnings::LearningRepository>> = None;
+
     // Create and run the agent
     let deps = AgentDeps {
         store: db,
@@ -1211,6 +1233,7 @@ async fn main() -> anyhow::Result<()> {
         tools,
         workspace,
         extension_manager,
+        learning_repo,
     };
     let agent = Agent::new(
         config.agent.clone(),

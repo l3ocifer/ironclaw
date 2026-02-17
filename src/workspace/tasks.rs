@@ -631,6 +631,135 @@ impl TaskRepository {
         Ok(row.get(0))
     }
 
+    /// Archive completed/failed/cancelled tasks older than `retention_days`.
+    ///
+    /// Returns a compact summary of archived tasks and the count removed.
+    /// This implements the "memory decay" pattern from beads — old terminal
+    /// tasks are summarized and removed to free context window space.
+    pub async fn archive_completed_tasks(
+        &self,
+        user_id: &str,
+        retention_days: i32,
+    ) -> Result<(String, usize), TaskError> {
+        let client = self.pool.get().await.map_err(TaskError::Pool)?;
+
+        // Find tasks in terminal state older than retention period
+        let rows = client
+            .query(
+                "SELECT id, title, status::text, priority::text, result, completed_at \
+                 FROM agent_tasks \
+                 WHERE user_id = $1 \
+                   AND status IN ('completed', 'failed', 'cancelled') \
+                   AND updated_at < NOW() - ($2 || ' days')::interval \
+                 ORDER BY completed_at ASC",
+                &[&user_id, &retention_days.to_string()],
+            )
+            .await
+            .map_err(TaskError::Db)?;
+
+        if rows.is_empty() {
+            return Ok((String::new(), 0));
+        }
+
+        // Build summary before deleting
+        let mut summary_lines = vec![format!(
+            "## Archived Tasks ({} tasks, >{} days old)\n",
+            rows.len(),
+            retention_days
+        )];
+
+        let mut ids_to_delete: Vec<Uuid> = Vec::new();
+        let mut completed = 0usize;
+        let mut failed = 0usize;
+        let mut cancelled = 0usize;
+
+        for row in &rows {
+            let id: Uuid = row.get(0);
+            let title: String = row.get(1);
+            let status: &str = row.get(2);
+            let priority: &str = row.get(3);
+            let result: Option<String> = row.get(4);
+            let completed_at: Option<DateTime<Utc>> = row.get(5);
+
+            match status {
+                "completed" => completed += 1,
+                "failed" => failed += 1,
+                "cancelled" => cancelled += 1,
+                _ => {}
+            }
+
+            let date_str = completed_at
+                .map(|d| d.format("%Y-%m-%d").to_string())
+                .unwrap_or_else(|| "unknown".to_string());
+
+            let status_icon = match status {
+                "completed" => "✓",
+                "failed" => "✗",
+                "cancelled" => "○",
+                _ => "?",
+            };
+
+            let result_str = result
+                .as_deref()
+                .map(|r| {
+                    if r.len() > 60 {
+                        format!(": {}...", &r[..57])
+                    } else {
+                        format!(": {r}")
+                    }
+                })
+                .unwrap_or_default();
+
+            summary_lines.push(format!(
+                "- {status_icon} [{priority}] {title} ({date_str}){result_str}"
+            ));
+
+            ids_to_delete.push(id);
+        }
+
+        summary_lines.push(format!(
+            "\nTotals: {completed} completed, {failed} failed, {cancelled} cancelled"
+        ));
+
+        // Delete archived tasks (cascading to deps and events via FK)
+        for id in &ids_to_delete {
+            // Delete events first (no cascade)
+            client
+                .execute(
+                    "DELETE FROM agent_task_events WHERE task_id = $1",
+                    &[id],
+                )
+                .await
+                .map_err(TaskError::Db)?;
+
+            // Delete dependency edges
+            client
+                .execute(
+                    "DELETE FROM agent_task_deps WHERE task_id = $1 OR depends_on = $1",
+                    &[id],
+                )
+                .await
+                .map_err(TaskError::Db)?;
+
+            // Delete the task
+            client
+                .execute("DELETE FROM agent_tasks WHERE id = $1", &[id])
+                .await
+                .map_err(TaskError::Db)?;
+        }
+
+        let summary = summary_lines.join("\n");
+        let count = ids_to_delete.len();
+
+        tracing::info!(
+            user_id,
+            archived = count,
+            "Archived {count} completed tasks (>{retention_days} days old)"
+        );
+
+        Ok((summary, count))
+    }
+
     /// After a task completes, check if any dependents are now unblocked.
     async fn promote_dependents(
         &self,

@@ -26,10 +26,11 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, Mutex};
 
 use crate::channels::OutgoingResponse;
 use crate::llm::{ChatMessage, CompletionRequest, FinishReason, LlmProvider};
+use crate::safety::integrity::IntegrityMonitor;
 use crate::workspace::Workspace;
 
 /// Configuration for the heartbeat runner.
@@ -100,6 +101,8 @@ pub struct HeartbeatRunner {
     llm: Arc<dyn LlmProvider>,
     response_tx: Option<mpsc::Sender<OutgoingResponse>>,
     consecutive_failures: u32,
+    /// Optional integrity monitor for workspace file drift detection.
+    integrity: Option<Arc<Mutex<IntegrityMonitor>>>,
 }
 
 impl HeartbeatRunner {
@@ -115,12 +118,19 @@ impl HeartbeatRunner {
             llm,
             response_tx: None,
             consecutive_failures: 0,
+            integrity: None,
         }
     }
 
     /// Set the response channel for notifications.
     pub fn with_response_channel(mut self, tx: mpsc::Sender<OutgoingResponse>) -> Self {
         self.response_tx = Some(tx);
+        self
+    }
+
+    /// Set the integrity monitor for workspace file drift detection.
+    pub fn with_integrity_monitor(mut self, monitor: Arc<Mutex<IntegrityMonitor>>) -> Self {
+        self.integrity = Some(monitor);
         self
     }
 
@@ -176,6 +186,14 @@ impl HeartbeatRunner {
 
     /// Run a single heartbeat check.
     pub async fn check_heartbeat(&self) -> HeartbeatResult {
+        // Run integrity check first (if configured)
+        if let Some(ref integrity) = self.integrity {
+            match self.run_integrity_check(integrity).await {
+                Some(result) => return result,
+                None => {} // No violations, continue
+            }
+        }
+
         // Get the heartbeat checklist
         let checklist = match self.workspace.heartbeat_checklist().await {
             Ok(Some(content)) if !is_effectively_empty(&content) => content,
@@ -267,6 +285,54 @@ impl HeartbeatRunner {
         HeartbeatResult::NeedsAttention(content.to_string())
     }
 
+    /// Run workspace integrity check and return a result if violations are found.
+    ///
+    /// Returns `Some(HeartbeatResult)` if there are violations that need attention,
+    /// `None` if everything is clean.
+    async fn run_integrity_check(
+        &self,
+        integrity: &Arc<Mutex<IntegrityMonitor>>,
+    ) -> Option<HeartbeatResult> {
+        let mut monitor = integrity.lock().await;
+        let violations = monitor.check(&self.workspace).await;
+
+        if violations.is_empty() {
+            return None;
+        }
+
+        // Build a report of violations
+        let mut report = String::from("⚠️ **Workspace Integrity Alert**\n\n");
+        let mut needs_attention = false;
+
+        for v in &violations {
+            report.push_str(&format!("- {v}\n"));
+            if v.mode == crate::safety::integrity::ProtectionMode::Alert {
+                needs_attention = true;
+            }
+        }
+
+        let restored_count = violations.iter().filter(|v| v.restored).count();
+        if restored_count > 0 {
+            report.push_str(&format!(
+                "\n{restored_count} file(s) auto-restored from approved baseline."
+            ));
+        }
+
+        tracing::info!(
+            violations = violations.len(),
+            restored = restored_count,
+            "Integrity check found violations"
+        );
+
+        if needs_attention {
+            Some(HeartbeatResult::NeedsAttention(report))
+        } else {
+            // All violations were auto-restored, just log it
+            tracing::info!("All integrity violations auto-restored");
+            None
+        }
+    }
+
     /// Send a notification about heartbeat findings.
     async fn send_notification(&self, message: &str) {
         let Some(ref tx) = self.response_tx else {
@@ -335,10 +401,14 @@ pub fn spawn_heartbeat(
     workspace: Arc<Workspace>,
     llm: Arc<dyn LlmProvider>,
     response_tx: Option<mpsc::Sender<OutgoingResponse>>,
+    integrity: Option<Arc<Mutex<IntegrityMonitor>>>,
 ) -> tokio::task::JoinHandle<()> {
     let mut runner = HeartbeatRunner::new(config, workspace, llm);
     if let Some(tx) = response_tx {
         runner = runner.with_response_channel(tx);
+    }
+    if let Some(monitor) = integrity {
+        runner = runner.with_integrity_monitor(monitor);
     }
 
     tokio::spawn(async move {

@@ -576,6 +576,497 @@ static PACK_SENSITIVE_PATHS: Pack = Pack {
 };
 
 // ---------------------------------------------------------------------------
+// Pack: storage (S3, GCS, MinIO, Azure Blob)
+// ---------------------------------------------------------------------------
+
+static PACK_STORAGE: Pack = Pack {
+    id: "storage",
+    keywords: &["s3", "gsutil", "mc", "azcopy", "rclone", "minio"],
+    safe_patterns: &[
+        SafePattern {
+            _name: "s3-list-head",
+            regex: lazy_re!(r"(?i)^(aws\s+s3\s+(ls|cp\s+s3://\S+\s+\.)|gsutil\s+(ls|cat|stat)|mc\s+(ls|stat|cat))\b"),
+        },
+    ],
+    destructive_patterns: &[
+        DestructivePattern {
+            name: "s3-rb-force",
+            regex: lazy_re!(r"(?i)aws\s+s3\s+rb\s+.*--force"),
+            reason: "Force-removing an S3 bucket deletes all objects and the bucket",
+            severity: Severity::Critical,
+            suggestion: Some("List bucket contents first: `aws s3 ls s3://bucket/`"),
+        },
+        DestructivePattern {
+            name: "gsutil-rm-recursive",
+            regex: lazy_re!(r"(?i)gsutil\s+(-m\s+)?rm\s+-r"),
+            reason: "Recursive GCS deletion can remove entire buckets of data",
+            severity: Severity::High,
+            suggestion: Some("Use `gsutil ls` first to verify the path"),
+        },
+        DestructivePattern {
+            name: "mc-rm-recursive",
+            regex: lazy_re!(r"(?i)mc\s+rm\s+.*--recursive"),
+            reason: "Recursive MinIO/S3 deletion can remove all objects",
+            severity: Severity::High,
+            suggestion: None,
+        },
+        DestructivePattern {
+            name: "azcopy-remove",
+            regex: lazy_re!(r"(?i)azcopy\s+remove\s+.*--recursive"),
+            reason: "Recursive Azure Blob deletion can remove entire containers",
+            severity: Severity::High,
+            suggestion: None,
+        },
+        DestructivePattern {
+            name: "rclone-purge",
+            regex: lazy_re!(r"(?i)rclone\s+(purge|delete)\b"),
+            reason: "rclone purge/delete removes remote data permanently",
+            severity: Severity::High,
+            suggestion: Some("Use `rclone lsf` to list first, `rclone --dry-run` to preview"),
+        },
+    ],
+};
+
+// ---------------------------------------------------------------------------
+// Pack: secrets management
+// ---------------------------------------------------------------------------
+
+static PACK_SECRETS: Pack = Pack {
+    id: "secrets",
+    keywords: &["vault", "op ", "doppler", "aws secretsmanager", "sops"],
+    safe_patterns: &[
+        SafePattern {
+            _name: "vault-read-list",
+            regex: lazy_re!(r"(?i)^vault\s+(read|list|status|kv\s+get)\b"),
+        },
+        SafePattern {
+            _name: "op-read",
+            regex: lazy_re!(r"(?i)^op\s+(item\s+get|read|whoami)\b"),
+        },
+    ],
+    destructive_patterns: &[
+        DestructivePattern {
+            name: "vault-delete",
+            regex: lazy_re!(r"(?i)vault\s+(delete|destroy|kv\s+destroy)\b"),
+            reason: "Vault delete/destroy permanently removes secrets",
+            severity: Severity::High,
+            suggestion: Some("Use `vault kv get` to verify before deleting"),
+        },
+        DestructivePattern {
+            name: "vault-seal",
+            regex: lazy_re!(r"(?i)vault\s+operator\s+seal\b"),
+            reason: "Sealing Vault makes all secrets inaccessible until manual unseal",
+            severity: Severity::Critical,
+            suggestion: None,
+        },
+        DestructivePattern {
+            name: "op-delete",
+            regex: lazy_re!(r"(?i)op\s+item\s+delete\b"),
+            reason: "1Password item deletion is permanent",
+            severity: Severity::High,
+            suggestion: Some("Use `op item get` to verify before deleting"),
+        },
+        DestructivePattern {
+            name: "aws-secrets-delete",
+            regex: lazy_re!(r"(?i)aws\s+secretsmanager\s+delete-secret"),
+            reason: "Deleting AWS Secrets Manager secrets is destructive",
+            severity: Severity::High,
+            suggestion: Some("Set a recovery window with `--recovery-window-in-days`"),
+        },
+        DestructivePattern {
+            name: "doppler-delete",
+            regex: lazy_re!(r"(?i)doppler\s+secrets\s+delete\b"),
+            reason: "Deleting Doppler secrets removes them from all environments",
+            severity: Severity::High,
+            suggestion: None,
+        },
+    ],
+};
+
+// ---------------------------------------------------------------------------
+// Pack: remote access (rsync, scp, ssh)
+// ---------------------------------------------------------------------------
+
+static PACK_REMOTE: Pack = Pack {
+    id: "remote",
+    keywords: &["rsync", "scp", "ssh"],
+    safe_patterns: &[
+        SafePattern {
+            _name: "rsync-dry-run",
+            regex: lazy_re!(r"(?i)rsync\s+.*--dry-run"),
+        },
+        SafePattern {
+            _name: "scp-download",
+            regex: lazy_re!(r"(?i)^scp\s+\S+:\S+\s+\.\s*$"),
+        },
+    ],
+    destructive_patterns: &[
+        DestructivePattern {
+            name: "rsync-delete",
+            regex: lazy_re!(r"(?i)rsync\s+.*--delete"),
+            reason: "rsync --delete removes files in destination not in source",
+            severity: Severity::High,
+            suggestion: Some("Use `rsync --dry-run --delete` to preview changes first"),
+        },
+        DestructivePattern {
+            name: "rsync-to-root",
+            regex: lazy_re!(r"(?i)rsync\s+.*\s+/\s*$"),
+            reason: "Syncing to root filesystem can overwrite system files",
+            severity: Severity::Critical,
+            suggestion: None,
+        },
+        DestructivePattern {
+            name: "ssh-remote-rm",
+            regex: lazy_re!(r#"(?i)ssh\s+\S+\s+['"]?rm\s+-r"#),
+            reason: "Remote recursive deletion via SSH",
+            severity: Severity::High,
+            suggestion: Some("Run the command interactively on the remote host"),
+        },
+    ],
+};
+
+// ---------------------------------------------------------------------------
+// Pack: CI/CD (Jenkins, GitHub Actions, GitLab CI)
+// ---------------------------------------------------------------------------
+
+static PACK_CI_CD: Pack = Pack {
+    id: "ci_cd",
+    keywords: &["jenkins", "gh run", "gh workflow", "gitlab"],
+    safe_patterns: &[
+        SafePattern {
+            _name: "gh-run-list",
+            regex: lazy_re!(r"(?i)^gh\s+(run|workflow)\s+(list|view|watch)\b"),
+        },
+    ],
+    destructive_patterns: &[
+        DestructivePattern {
+            name: "jenkins-delete-job",
+            regex: lazy_re!(r"(?i)jenkins.*delete.*job\b"),
+            reason: "Deleting Jenkins jobs removes build history and configuration",
+            severity: Severity::High,
+            suggestion: Some("Disable the job instead of deleting"),
+        },
+        DestructivePattern {
+            name: "gh-workflow-disable",
+            regex: lazy_re!(r"(?i)gh\s+workflow\s+disable\b"),
+            reason: "Disabling a GitHub Actions workflow stops all future runs",
+            severity: Severity::Medium,
+            suggestion: None,
+        },
+        DestructivePattern {
+            name: "gh-run-cancel",
+            regex: lazy_re!(r"(?i)gh\s+run\s+cancel\b"),
+            reason: "Cancelling a running workflow interrupts in-progress deployments",
+            severity: Severity::Medium,
+            suggestion: None,
+        },
+    ],
+};
+
+// ---------------------------------------------------------------------------
+// Pack: networking (nftables, ufw, firewalld)
+// ---------------------------------------------------------------------------
+
+static PACK_NETWORKING: Pack = Pack {
+    id: "networking",
+    keywords: &["nft", "ufw", "firewall-cmd", "ip route", "ip link", "brctl", "nmcli"],
+    safe_patterns: &[
+        SafePattern {
+            _name: "nft-list",
+            regex: lazy_re!(r"(?i)^nft\s+list\b"),
+        },
+        SafePattern {
+            _name: "ufw-status",
+            regex: lazy_re!(r"(?i)^ufw\s+status\b"),
+        },
+    ],
+    destructive_patterns: &[
+        DestructivePattern {
+            name: "nft-flush",
+            regex: lazy_re!(r"(?i)nft\s+flush\s+ruleset"),
+            reason: "Flushing nftables ruleset removes all firewall rules",
+            severity: Severity::Critical,
+            suggestion: Some("Save rules first: `nft list ruleset > backup.nft`"),
+        },
+        DestructivePattern {
+            name: "ufw-disable",
+            regex: lazy_re!(r"(?i)ufw\s+disable\b"),
+            reason: "Disabling UFW removes all firewall protections",
+            severity: Severity::High,
+            suggestion: None,
+        },
+        DestructivePattern {
+            name: "ufw-reset",
+            regex: lazy_re!(r"(?i)ufw\s+reset\b"),
+            reason: "UFW reset removes all rules and disables the firewall",
+            severity: Severity::Critical,
+            suggestion: None,
+        },
+        DestructivePattern {
+            name: "ip-route-flush",
+            regex: lazy_re!(r"(?i)ip\s+route\s+flush"),
+            reason: "Flushing routes can cause network connectivity loss",
+            severity: Severity::Critical,
+            suggestion: None,
+        },
+        DestructivePattern {
+            name: "ip-link-delete",
+            regex: lazy_re!(r"(?i)ip\s+link\s+delete\b"),
+            reason: "Deleting network interfaces disrupts connectivity",
+            severity: Severity::High,
+            suggestion: None,
+        },
+    ],
+};
+
+// ---------------------------------------------------------------------------
+// Pack: DNS
+// ---------------------------------------------------------------------------
+
+static PACK_DNS: Pack = Pack {
+    id: "dns",
+    keywords: &["nsupdate", "rndc", "named", "dig axfr", "route53"],
+    safe_patterns: &[
+        SafePattern {
+            _name: "dig-query",
+            regex: lazy_re!(r"(?i)^dig\s+[a-zA-Z0-9._-]+\s*$"),
+        },
+    ],
+    destructive_patterns: &[
+        DestructivePattern {
+            name: "nsupdate-delete",
+            regex: lazy_re!(r"(?i)nsupdate.*delete\b"),
+            reason: "nsupdate delete removes DNS records",
+            severity: Severity::High,
+            suggestion: Some("Verify the record exists first with `dig`"),
+        },
+        DestructivePattern {
+            name: "rndc-flush",
+            regex: lazy_re!(r"(?i)rndc\s+flush\b"),
+            reason: "rndc flush clears the DNS cache, causing resolution delays",
+            severity: Severity::Medium,
+            suggestion: None,
+        },
+        DestructivePattern {
+            name: "route53-delete",
+            regex: lazy_re!(r"(?i)aws\s+route53\s+.*DELETE"),
+            reason: "Deleting Route53 records can break DNS resolution",
+            severity: Severity::High,
+            suggestion: Some("Use `aws route53 list-resource-record-sets` to verify first"),
+        },
+    ],
+};
+
+// ---------------------------------------------------------------------------
+// Pack: backup tools (restic, borg, velero)
+// ---------------------------------------------------------------------------
+
+static PACK_BACKUP: Pack = Pack {
+    id: "backup",
+    keywords: &["restic", "borg", "velero"],
+    safe_patterns: &[
+        SafePattern {
+            _name: "restic-list-snapshots",
+            regex: lazy_re!(r"(?i)^restic\s+(snapshots|ls|stats|check)\b"),
+        },
+        SafePattern {
+            _name: "borg-list",
+            regex: lazy_re!(r"(?i)^borg\s+(list|info|check)\b"),
+        },
+    ],
+    destructive_patterns: &[
+        DestructivePattern {
+            name: "restic-forget-prune",
+            regex: lazy_re!(r"(?i)restic\s+forget\s+.*--prune"),
+            reason: "restic forget --prune permanently removes backup snapshots",
+            severity: Severity::High,
+            suggestion: Some("Use `restic forget --dry-run` first to preview"),
+        },
+        DestructivePattern {
+            name: "borg-delete",
+            regex: lazy_re!(r"(?i)borg\s+delete\b"),
+            reason: "borg delete permanently removes backup archives",
+            severity: Severity::High,
+            suggestion: Some("Use `borg list` to verify the archive first"),
+        },
+        DestructivePattern {
+            name: "velero-delete",
+            regex: lazy_re!(r"(?i)velero\s+(delete|destroy)\b"),
+            reason: "Deleting Velero backups/schedules removes disaster recovery capability",
+            severity: Severity::High,
+            suggestion: None,
+        },
+    ],
+};
+
+// ---------------------------------------------------------------------------
+// Pack: messaging (Kafka, RabbitMQ, NATS)
+// ---------------------------------------------------------------------------
+
+static PACK_MESSAGING: Pack = Pack {
+    id: "messaging",
+    keywords: &["kafka", "rabbitmq", "nats", "celery"],
+    safe_patterns: &[
+        SafePattern {
+            _name: "kafka-list",
+            regex: lazy_re!(r"(?i)kafka.*--list\b"),
+        },
+    ],
+    destructive_patterns: &[
+        DestructivePattern {
+            name: "kafka-delete-topic",
+            regex: lazy_re!(r"(?i)kafka.*--delete\s+--topic"),
+            reason: "Deleting a Kafka topic permanently removes all its messages",
+            severity: Severity::High,
+            suggestion: None,
+        },
+        DestructivePattern {
+            name: "rabbitmq-delete",
+            regex: lazy_re!(r"(?i)rabbitmqctl\s+(delete_queue|delete_vhost|reset)\b"),
+            reason: "RabbitMQ delete/reset permanently removes queues and messages",
+            severity: Severity::High,
+            suggestion: None,
+        },
+        DestructivePattern {
+            name: "rabbitmq-purge",
+            regex: lazy_re!(r"(?i)rabbitmqctl\s+purge_queue\b"),
+            reason: "Purging a RabbitMQ queue removes all pending messages",
+            severity: Severity::High,
+            suggestion: None,
+        },
+        DestructivePattern {
+            name: "nats-stream-delete",
+            regex: lazy_re!(r"(?i)nats\s+stream\s+(rm|del|delete|purge)\b"),
+            reason: "Deleting/purging a NATS stream removes all stored messages",
+            severity: Severity::High,
+            suggestion: None,
+        },
+    ],
+};
+
+// ---------------------------------------------------------------------------
+// Pack: search engines (Elasticsearch, OpenSearch)
+// ---------------------------------------------------------------------------
+
+static PACK_SEARCH: Pack = Pack {
+    id: "search",
+    keywords: &["elasticsearch", "opensearch", ":9200", ":9300"],
+    safe_patterns: &[
+        SafePattern {
+            _name: "es-get-cat",
+            regex: lazy_re!(r"(?i)curl\s+.*:(9200|9300)/(_cat|_cluster|_nodes)"),
+        },
+    ],
+    destructive_patterns: &[
+        DestructivePattern {
+            name: "es-delete-index",
+            regex: lazy_re!(r"(?i)curl\s+-X\s*DELETE\s+.*:(9200|9300)/\w"),
+            reason: "Deleting an Elasticsearch index permanently removes all documents",
+            severity: Severity::High,
+            suggestion: Some("Use snapshot API to back up the index first"),
+        },
+        DestructivePattern {
+            name: "es-delete-all",
+            regex: lazy_re!(r"(?i)curl\s+-X\s*DELETE\s+.*:(9200|9300)/\*"),
+            reason: "Deleting all Elasticsearch indices removes the entire cluster data",
+            severity: Severity::Critical,
+            suggestion: None,
+        },
+    ],
+};
+
+// ---------------------------------------------------------------------------
+// Pack: package managers
+// ---------------------------------------------------------------------------
+
+static PACK_PACKAGE_MANAGERS: Pack = Pack {
+    id: "package_managers",
+    keywords: &["npm", "pip", "cargo", "apt", "brew", "yum", "dnf", "pacman", "gem"],
+    safe_patterns: &[
+        SafePattern {
+            _name: "npm-list-info",
+            regex: lazy_re!(r"(?i)^npm\s+(list|info|view|audit|outdated|ls)\b"),
+        },
+        SafePattern {
+            _name: "pip-list",
+            regex: lazy_re!(r"(?i)^pip[3]?\s+(list|show|freeze|check)\b"),
+        },
+        SafePattern {
+            _name: "cargo-check-build",
+            regex: lazy_re!(r"(?i)^cargo\s+(check|build|test|bench|clippy|fmt|doc)\b"),
+        },
+    ],
+    destructive_patterns: &[
+        DestructivePattern {
+            name: "npm-install-global",
+            regex: lazy_re!(r"(?i)npm\s+install\s+(-g|--global)\b"),
+            reason: "Global npm install affects the entire system",
+            severity: Severity::Medium,
+            suggestion: Some("Use `npx` for one-off tools, or local `npm install`"),
+        },
+        DestructivePattern {
+            name: "pip-install-system",
+            regex: lazy_re!(r"(?i)sudo\s+pip[3]?\s+install\b"),
+            reason: "System-wide pip install can break OS Python packages",
+            severity: Severity::Medium,
+            suggestion: Some("Use a virtual environment: `python -m venv .venv`"),
+        },
+        DestructivePattern {
+            name: "apt-remove-essential",
+            regex: lazy_re!(r"(?i)(apt|apt-get)\s+(remove|purge)\s+.*(python3?|systemd|libc|linux-image)"),
+            reason: "Removing essential system packages can render the system unbootable",
+            severity: Severity::Critical,
+            suggestion: None,
+        },
+        DestructivePattern {
+            name: "cargo-install-force",
+            regex: lazy_re!(r"(?i)cargo\s+install\s+.*--force"),
+            reason: "Force-installing cargo binaries overwrites existing versions",
+            severity: Severity::Low,
+            suggestion: None,
+        },
+    ],
+};
+
+// ---------------------------------------------------------------------------
+// Pack: environment variables
+// ---------------------------------------------------------------------------
+
+static PACK_ENV_VARS: Pack = Pack {
+    id: "env_vars",
+    keywords: &["export ", "unset ", "env ", "printenv"],
+    safe_patterns: &[
+        SafePattern {
+            _name: "env-display",
+            regex: lazy_re!(r"(?i)^(env|printenv|echo\s+\$)\b"),
+        },
+    ],
+    destructive_patterns: &[
+        DestructivePattern {
+            name: "unset-path",
+            regex: lazy_re!(r"(?i)unset\s+PATH\b"),
+            reason: "Unsetting PATH makes all commands unreachable",
+            severity: Severity::High,
+            suggestion: None,
+        },
+        DestructivePattern {
+            name: "overwrite-path",
+            regex: lazy_re!(r#"(?i)export\s+PATH\s*=\s*['"]?/"#),
+            reason: "Overwriting PATH (without $PATH) removes access to system commands",
+            severity: Severity::High,
+            suggestion: Some("Append instead: `export PATH=\"/new/path:$PATH\"`"),
+        },
+        DestructivePattern {
+            name: "unset-home",
+            regex: lazy_re!(r"(?i)unset\s+(HOME|USER|SHELL)\b"),
+            reason: "Unsetting core environment variables can break shell functionality",
+            severity: Severity::Medium,
+            suggestion: None,
+        },
+    ],
+};
+
+// ---------------------------------------------------------------------------
 // All packs
 // ---------------------------------------------------------------------------
 
@@ -589,6 +1080,17 @@ static ALL_PACKS: &[&Pack] = &[
     &PACK_PIPED_EXEC,
     &PACK_INLINE_SCRIPTS,
     &PACK_SENSITIVE_PATHS,
+    &PACK_STORAGE,
+    &PACK_SECRETS,
+    &PACK_REMOTE,
+    &PACK_CI_CD,
+    &PACK_NETWORKING,
+    &PACK_DNS,
+    &PACK_BACKUP,
+    &PACK_MESSAGING,
+    &PACK_SEARCH,
+    &PACK_PACKAGE_MANAGERS,
+    &PACK_ENV_VARS,
 ];
 
 // ---------------------------------------------------------------------------
@@ -879,5 +1381,180 @@ mod tests {
     fn test_fail_mode_default_open() {
         let g = CommandGuard::default();
         assert_eq!(g.fail_mode, FailMode::Open);
+    }
+
+    // --- Storage ---
+    #[test]
+    fn test_s3_rb_force_blocked() {
+        let g = guard();
+        assert!(g.check("aws s3 rb s3://my-bucket --force").is_blocked());
+    }
+
+    #[test]
+    fn test_gsutil_rm_recursive_blocked() {
+        let g = guard();
+        assert!(g.check("gsutil rm -r gs://bucket/path").is_blocked());
+    }
+
+    #[test]
+    fn test_rclone_purge_blocked() {
+        let g = guard();
+        assert!(g.check("rclone purge remote:path").is_blocked());
+    }
+
+    // --- Secrets ---
+    #[test]
+    fn test_vault_delete_blocked() {
+        let g = guard();
+        assert!(g.check("vault delete secret/myapp").is_blocked());
+    }
+
+    #[test]
+    fn test_vault_seal_blocked() {
+        let g = guard();
+        assert!(g.check("vault operator seal").is_blocked());
+    }
+
+    #[test]
+    fn test_vault_read_safe() {
+        let g = guard();
+        assert!(!g.check("vault read secret/myapp").is_blocked());
+    }
+
+    // --- Remote ---
+    #[test]
+    fn test_rsync_delete_blocked() {
+        let g = guard();
+        assert!(g.check("rsync -avz --delete src/ dest/").is_blocked());
+    }
+
+    #[test]
+    fn test_rsync_dry_run_safe() {
+        let g = guard();
+        assert!(!g.check("rsync --dry-run --delete src/ dest/").is_blocked());
+    }
+
+    // --- CI/CD ---
+    #[test]
+    fn test_gh_workflow_disable_blocked() {
+        let g = guard();
+        assert!(g.check("gh workflow disable my-workflow").is_blocked());
+    }
+
+    #[test]
+    fn test_gh_run_list_safe() {
+        let g = guard();
+        assert!(!g.check("gh run list").is_blocked());
+    }
+
+    // --- Networking ---
+    #[test]
+    fn test_nft_flush_blocked() {
+        let g = guard();
+        assert!(g.check("nft flush ruleset").is_blocked());
+    }
+
+    #[test]
+    fn test_ufw_disable_blocked() {
+        let g = guard();
+        assert!(g.check("ufw disable").is_blocked());
+    }
+
+    #[test]
+    fn test_ip_route_flush_blocked() {
+        let g = guard();
+        assert!(g.check("ip route flush table main").is_blocked());
+    }
+
+    // --- DNS ---
+    #[test]
+    fn test_route53_delete_blocked() {
+        let g = guard();
+        assert!(g.check("aws route53 change-resource-record-sets --action DELETE").is_blocked());
+    }
+
+    // --- Backup ---
+    #[test]
+    fn test_restic_forget_prune_blocked() {
+        let g = guard();
+        assert!(g.check("restic forget --prune --keep-last 3").is_blocked());
+    }
+
+    #[test]
+    fn test_restic_snapshots_safe() {
+        let g = guard();
+        assert!(!g.check("restic snapshots").is_blocked());
+    }
+
+    #[test]
+    fn test_borg_delete_blocked() {
+        let g = guard();
+        assert!(g.check("borg delete ::archive-name").is_blocked());
+    }
+
+    // --- Messaging ---
+    #[test]
+    fn test_kafka_delete_topic_blocked() {
+        let g = guard();
+        assert!(g.check("kafka-topics --delete --topic my-topic").is_blocked());
+    }
+
+    #[test]
+    fn test_rabbitmq_reset_blocked() {
+        let g = guard();
+        assert!(g.check("rabbitmqctl reset").is_blocked());
+    }
+
+    #[test]
+    fn test_nats_stream_delete_blocked() {
+        let g = guard();
+        assert!(g.check("nats stream rm my-stream").is_blocked());
+    }
+
+    // --- Search ---
+    #[test]
+    fn test_es_delete_index_blocked() {
+        let g = guard();
+        assert!(g.check("curl -X DELETE localhost:9200/my-index").is_blocked());
+    }
+
+    // --- Package managers ---
+    #[test]
+    fn test_npm_global_install_blocked() {
+        let g = guard();
+        assert!(g.check("npm install -g some-package").is_blocked());
+    }
+
+    #[test]
+    fn test_sudo_pip_install_blocked() {
+        let g = guard();
+        assert!(g.check("sudo pip install requests").is_blocked());
+    }
+
+    #[test]
+    fn test_apt_remove_essential_blocked() {
+        let g = guard();
+        assert!(g.check("apt remove python3").is_blocked());
+    }
+
+    #[test]
+    fn test_cargo_build_safe() {
+        let g = guard();
+        assert!(!g.check("cargo build").is_blocked());
+        assert!(!g.check("cargo test").is_blocked());
+        assert!(!g.check("cargo clippy").is_blocked());
+    }
+
+    // --- Env vars ---
+    #[test]
+    fn test_unset_path_blocked() {
+        let g = guard();
+        assert!(g.check("unset PATH").is_blocked());
+    }
+
+    #[test]
+    fn test_overwrite_path_blocked() {
+        let g = guard();
+        assert!(g.check("export PATH='/usr/local/bin'").is_blocked());
     }
 }

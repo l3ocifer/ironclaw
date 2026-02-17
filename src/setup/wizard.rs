@@ -949,7 +949,7 @@ impl SetupWizard {
                         "anthropic::claude-sonnet-4-20250514".into(),
                         "Claude Sonnet 4 (best quality)".into(),
                     ),
-                    ("openai::gpt-4o".into(), "GPT-4o".into()),
+                    ("openai::gpt-5.3-codex".into(), "GPT-5.3 Codex".into()),
                 ];
 
                 let models = if fetched.is_empty() {
@@ -1024,6 +1024,7 @@ impl SetupWizard {
             },
             openai: None,
             anthropic: None,
+            gemini: None,
             ollama: None,
             openai_compatible: None,
         };
@@ -1757,9 +1758,9 @@ async fn fetch_anthropic_models(cached_key: Option<&str>) -> Vec<(String, String
 /// Returns `(model_id, display_label)` pairs. Falls back to static defaults on error.
 async fn fetch_openai_models(cached_key: Option<&str>) -> Vec<(String, String)> {
     let static_defaults = vec![
-        ("gpt-4o".into(), "GPT-4o".into()),
-        ("gpt-4o-mini".into(), "GPT-4o Mini (fast)".into()),
-        ("o3".into(), "o3 (reasoning)".into()),
+        ("gpt-5.3-codex".into(), "GPT-5.3 Codex (agentic coding)".into()),
+        ("gpt-5.2".into(), "GPT-5.2 (flagship)".into()),
+        ("gpt-5-mini".into(), "GPT-5 Mini (fast)".into()),
     ];
 
     let api_key = cached_key

@@ -44,6 +44,7 @@ mod chunker;
 mod document;
 mod embeddings;
 mod logseq;
+pub mod learnings;
 pub mod merge;
 #[cfg(feature = "postgres")]
 mod repository;
@@ -245,6 +246,33 @@ impl WorkspaceStorage {
             }
         }
     }
+
+    /// Check if a document with this content hash exists for the given user.
+    /// Used for cross-machine session dedup (Phase 6b).
+    async fn has_content_hash(
+        &self,
+        user_id: &str,
+        content_hash: &str,
+    ) -> Result<bool, WorkspaceError> {
+        match self {
+            #[cfg(feature = "postgres")]
+            Self::Repo(repo) => repo.has_content_hash(user_id, content_hash).await,
+            Self::Db(_) => Ok(false), // Not supported for generic DB backend
+        }
+    }
+
+    /// Set the content hash for a document (after write).
+    async fn set_content_hash(
+        &self,
+        doc_id: Uuid,
+        content_hash: &str,
+    ) -> Result<(), WorkspaceError> {
+        match self {
+            #[cfg(feature = "postgres")]
+            Self::Repo(repo) => repo.set_content_hash(doc_id, content_hash).await,
+            Self::Db(_) => Ok(()), // No-op for generic DB backend
+        }
+    }
 }
 
 /// Default template seeded into HEARTBEAT.md on first access.
@@ -364,6 +392,101 @@ impl Workspace {
 
         // Return updated doc
         self.storage.get_document_by_id(doc.id).await
+    }
+
+    /// Write content with automatic semantic merge on conflict.
+    ///
+    /// If `expected_base` is provided and differs from the current content,
+    /// a 3-way semantic merge is performed using weave-core. This prevents
+    /// data loss when multiple agents edit the same file concurrently.
+    ///
+    /// - If the file is new or empty, writes directly.
+    /// - If `expected_base` matches current content, writes directly (no conflict).
+    /// - If `expected_base` differs from current content, performs a 3-way merge
+    ///   using `merge_prefer_ours()` which auto-resolves conflicts by preferring
+    ///   the local agent's version.
+    ///
+    /// Returns the final document after write.
+    pub async fn write_with_merge(
+        &self,
+        path: &str,
+        content: &str,
+        expected_base: Option<&str>,
+    ) -> Result<MemoryDocument, WorkspaceError> {
+        let normalized = normalize_path(path);
+        let doc = self
+            .storage
+            .get_or_create_document_by_path(&self.user_id, self.agent_id, &normalized)
+            .await?;
+
+        let current_content = &doc.content;
+
+        // Determine if we need to merge
+        let final_content = match expected_base {
+            Some(base) if !current_content.is_empty() && current_content != base => {
+                // Conflict: current content has changed since our base
+                tracing::info!(
+                    path = normalized,
+                    base_len = base.len(),
+                    ours_len = content.len(),
+                    theirs_len = current_content.len(),
+                    "Concurrent edit detected, performing semantic merge"
+                );
+
+                let merged = merge::merge_prefer_ours(base, content, current_content, &normalized);
+
+                tracing::debug!(
+                    path = normalized,
+                    merged_len = merged.len(),
+                    "Semantic merge complete"
+                );
+
+                merged
+            }
+            _ => {
+                // No conflict: either no base, empty file, or base matches current
+                content.to_string()
+            }
+        };
+
+        self.storage
+            .update_document(doc.id, &final_content)
+            .await?;
+        self.reindex_document(doc.id).await?;
+        self.storage.get_document_by_id(doc.id).await
+    }
+
+    /// Write with content-hash dedup for cross-machine session merge.
+    ///
+    /// Computes a SHA-256 hash of the content and checks if a document with
+    /// that hash already exists for this user. If it does, skip the write
+    /// (idempotent). This prevents duplicate session files when Frack and
+    /// Frick sync their workspace databases.
+    ///
+    /// Returns `Ok(true)` if content was written, `Ok(false)` if deduplicated.
+    pub async fn write_dedup(
+        &self,
+        path: &str,
+        content: &str,
+    ) -> Result<bool, WorkspaceError> {
+        use sha2::{Digest, Sha256};
+
+        let hash = format!("{:x}", Sha256::digest(content.as_bytes()));
+
+        // Check if content with this hash already exists
+        if self.storage.has_content_hash(&self.user_id, &hash).await? {
+            tracing::debug!(
+                path = path,
+                hash = &hash[..12],
+                "Content-hash dedup: skipping duplicate write"
+            );
+            return Ok(false);
+        }
+
+        // Write normally, then set the content_hash
+        let doc = self.write(path, content).await?;
+        self.storage.set_content_hash(doc.id, &hash).await?;
+        Ok(true)
     }
 
     /// Append content to a file.
@@ -530,6 +653,20 @@ impl Workspace {
         include_memory: bool,
         logseq_context: Option<&str>,
     ) -> Result<String, WorkspaceError> {
+        self.system_prompt_with_learnings(include_memory, logseq_context, None)
+            .await
+    }
+
+    /// Build system prompt with optional learnings context.
+    ///
+    /// `learnings_context` is a pre-formatted string of active learnings.
+    /// Only injected in main sessions (same privacy scope as MEMORY.md).
+    pub async fn system_prompt_with_learnings(
+        &self,
+        include_memory: bool,
+        logseq_context: Option<&str>,
+        learnings_context: Option<&str>,
+    ) -> Result<String, WorkspaceError> {
         let mut parts = Vec::new();
 
         // Load identity files in order of importance
@@ -578,6 +715,11 @@ impl Workspace {
             }
             if !memory_parts.is_empty() {
                 parts.push(format!("## Long-term Memory\n\n{}", memory_parts.join("\n\n---\n\n")));
+            }
+
+            // Active learnings (experience-derived rules)
+            if let Some(ctx) = learnings_context.filter(|s| !s.is_empty()) {
+                parts.push(ctx.to_string());
             }
         }
 

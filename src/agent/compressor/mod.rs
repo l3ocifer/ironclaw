@@ -25,7 +25,9 @@
 
 pub mod dedup;
 pub mod dictionary;
+pub mod observations;
 pub mod patterns;
+pub mod salience;
 pub mod text_optimizer;
 
 use crate::llm::ChatMessage;
@@ -67,6 +69,9 @@ pub struct CompressorConfig {
     pub text_optimize: bool,
     /// Whether to apply aggressive text optimizations (default false).
     pub text_optimize_aggressive: bool,
+    /// Whether to apply observation extraction (default true).
+    /// This is the highest-savings layer but changes message structure.
+    pub observation_extraction: bool,
 }
 
 impl Default for CompressorConfig {
@@ -78,6 +83,7 @@ impl Default for CompressorConfig {
             dict_max_entries: 200,
             text_optimize: true,
             text_optimize_aggressive: false,
+            observation_extraction: true,
         }
     }
 }
@@ -97,6 +103,19 @@ impl CompressorPipeline {
         let tokens_before = estimate_tokens_batch(messages);
         let mut stages = Vec::new();
         let mut current = messages.to_vec();
+
+        // Stage 0: Observation extraction (highest savings, changes structure)
+        if self.config.observation_extraction && current.len() > 4 {
+            let before_obs = estimate_tokens_batch(&current);
+            current = observations::compress_to_observations(&current);
+            let after_obs = estimate_tokens_batch(&current);
+            if before_obs > after_obs {
+                stages.push(StageSavings {
+                    name: "observations".to_string(),
+                    tokens_saved: before_obs - after_obs,
+                });
+            }
+        }
 
         // Stage 1: Deduplication
         let before_dedup = estimate_tokens_batch(&current);

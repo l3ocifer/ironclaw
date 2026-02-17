@@ -53,6 +53,20 @@ pub struct Settings {
     #[serde(default)]
     pub openai_compatible_base_url: Option<String>,
 
+    // === Step 3b: Intelligent Routing ===
+    /// Routing profile: "auto", "eco", "premium", "free".
+    /// When set, enables intelligent request-based model selection.
+    #[serde(default)]
+    pub routing_profile: Option<String>,
+
+    /// Force agentic routing mode (auto-detects tool-heavy requests).
+    #[serde(default)]
+    pub routing_force_agentic: Option<bool>,
+
+    /// Enable session pinning (reuse selected model within a session).
+    #[serde(default)]
+    pub routing_session_pinning: Option<bool>,
+
     // === Step 4: Model Selection ===
     /// Currently selected model.
     #[serde(default)]
@@ -249,6 +263,10 @@ pub struct LogseqSettings {
     /// Include recent decisions from ai_namespace/{agent}/decisions.md (default: true).
     #[serde(default = "default_true")]
     pub include_decisions: bool,
+
+    /// Include shared voice/craft directives from ai_namespace/shared/voice.md (default: true).
+    #[serde(default = "default_true")]
+    pub include_voice: bool,
 }
 
 fn default_logseq_ai_namespace() -> String {
@@ -268,6 +286,7 @@ impl Default for LogseqSettings {
             include_user_profile: true,
             include_preferences: true,
             include_decisions: true,
+            include_voice: true,
         }
     }
 }

@@ -25,6 +25,9 @@ COPY wit/ wit/
 
 RUN cargo build --release --bin ironclaw
 
+# Install tilth (AST-aware code intelligence for agents)
+RUN cargo install tilth --root /usr/local
+
 # Stage 2: Runtime
 FROM debian:bookworm-slim
 
@@ -33,6 +36,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=builder /app/target/release/ironclaw /usr/local/bin/ironclaw
+COPY --from=builder /usr/local/bin/tilth /usr/local/bin/tilth
 COPY --from=builder /app/migrations /app/migrations
 
 # Non-root user

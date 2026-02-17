@@ -86,6 +86,8 @@ pub struct AgentDeps {
     pub tools: Arc<ToolRegistry>,
     pub workspace: Option<Arc<Workspace>>,
     pub extension_manager: Option<Arc<ExtensionManager>>,
+    /// Learning repository for evidence-backed learnings (Phase 6b).
+    pub learning_repo: Option<Arc<crate::workspace::learnings::LearningRepository>>,
 }
 
 /// The main agent that coordinates all components.
@@ -318,6 +320,7 @@ impl Agent {
                         workspace.clone(),
                         self.llm().clone(),
                         Some(notify_tx),
+                        None, // Integrity monitor set separately at startup
                     ))
                 } else {
                     tracing::warn!("Heartbeat enabled but no workspace available");
@@ -408,6 +411,14 @@ impl Agent {
 
         // Extract engine ref for use in message loop
         let routine_engine_for_loop = routine_handle.as_ref().map(|(_, e)| Arc::clone(e));
+
+        // Run BOOT.md instructions on startup (Phase 3: OpenClaw gap)
+        if self.workspace().is_some() {
+            let boot_user_id = "system";
+            if let Err(e) = self.run_boot_if_present(boot_user_id).await {
+                tracing::warn!("BOOT.md startup failed: {}", e);
+            }
+        }
 
         // Main message loop
         tracing::info!("Agent {} ready and listening", self.config.name);
@@ -1203,7 +1214,29 @@ impl Agent {
             } else {
                 Some(logseq_context.as_str())
             };
-            match ws.system_prompt(include_memory, logseq_opt).await {
+
+            // Load active learnings for main sessions
+            let learnings_context = if include_memory {
+                if let Some(ref repo) = self.deps.learning_repo {
+                    repo.format_for_prompt(&message.user_id, &self.config.agent_id, 15)
+                        .await
+                        .unwrap_or_default()
+                } else {
+                    String::new()
+                }
+            } else {
+                String::new()
+            };
+            let learnings_opt = if learnings_context.is_empty() {
+                None
+            } else {
+                Some(learnings_context.as_str())
+            };
+
+            match ws
+                .system_prompt_with_learnings(include_memory, logseq_opt, learnings_opt)
+                .await
+            {
                 Ok(prompt) if !prompt.is_empty() => Some(prompt),
                 Ok(_) => None,
                 Err(e) => {
@@ -2233,10 +2266,9 @@ impl Agent {
     async fn run_memory_flush_turn(
         &self,
         flush_cfg: &MemoryFlushConfig,
-        _user_id: &str,
+        user_id: &str,
     ) -> Result<(), Error> {
-        // Build memory tools list: memory_write, memory_read, memory_search
-        // These are the only tools available during flush (no shell, no file, no HTTP).
+        // Memory tools available during flush (no shell, no file, no HTTP).
         let tool_defs = self
             .tools()
             .tool_definitions_for(&[
@@ -2249,34 +2281,60 @@ impl Agent {
 
         let reasoning = Reasoning::new(self.llm().clone(), self.safety().clone())
             .with_system_prompt(flush_cfg.system_prompt.clone());
-        let messages = vec![ChatMessage::user(&flush_cfg.prompt)];
-        let context = ReasoningContext::new()
-            .with_messages(messages)
-            .with_tools(tool_defs);
+        let mut messages = vec![ChatMessage::user(&flush_cfg.prompt)];
+        let job_ctx = JobContext::with_user(user_id, "memory_flush", "Pre-compaction memory flush");
 
-        let output = reasoning.respond_with_tools(&context).await?;
+        for iteration in 0..Self::MEMORY_FLUSH_MAX_ITERATIONS {
+            let context = ReasoningContext::new()
+                .with_messages(messages.clone())
+                .with_tools(tool_defs.clone());
 
-        // Extract the text content from the result
-        let text = match &output.result {
-            RespondResult::Text(s) => s.clone(),
-            RespondResult::ToolCalls { content, .. } => content.clone().unwrap_or_default(),
-        };
+            let output = reasoning.respond_with_tools(&context).await?;
 
-        // If the model responded with NO_REPLY, nothing to store
-        if text.trim() == "NO_REPLY" {
-            tracing::debug!("Memory flush: model had nothing to store");
-            return Ok(());
+            match &output.result {
+                RespondResult::Text(text) => {
+                    if text.trim() == "NO_REPLY" {
+                        tracing::debug!("Memory flush: model had nothing to store");
+                    } else if !text.is_empty() {
+                        tracing::debug!(
+                            "Memory flush response (iter {}): {}",
+                            iteration,
+                            truncate_for_preview(text, 200)
+                        );
+                    }
+                    return Ok(());
+                }
+                RespondResult::ToolCalls { tool_calls, content } => {
+                    if let Some(text) = content {
+                        tracing::debug!(
+                            "Memory flush text (iter {}): {}",
+                            iteration,
+                            truncate_for_preview(text, 200)
+                        );
+                    }
+
+                    // Execute each tool call and collect results
+                    for tc in tool_calls {
+                        let result = self
+                            .execute_chat_tool(&tc.name, &tc.arguments, &job_ctx)
+                            .await;
+                        let result_content = match result {
+                            Ok(output) => output,
+                            Err(e) => format!("Error: {}", e),
+                        };
+                        tracing::debug!(
+                            "Memory flush tool {}(iter {}): {}",
+                            tc.name,
+                            iteration,
+                            truncate_for_preview(&result_content, 100)
+                        );
+                        messages.push(ChatMessage::tool_result(&tc.id, &tc.name, result_content));
+                    }
+                }
+            }
         }
 
-        // Log the flush response for diagnostics
-        if !text.is_empty() {
-            tracing::debug!(
-                "Memory flush response ({}): {}",
-                crate::agent::context_monitor::estimate_text_tokens(&text),
-                truncate_for_preview(&text, 200)
-            );
-        }
-
+        tracing::debug!("Memory flush reached max iterations ({})", Self::MEMORY_FLUSH_MAX_ITERATIONS);
         Ok(())
     }
 
@@ -2399,11 +2457,17 @@ impl Agent {
         }
         let content = lines.join("\n");
 
-        workspace
-            .write(&path, &content)
-            .await
-            .map_err(Error::from)?;
-        tracing::info!("Saved thread to workspace: {}", path);
+        // Use content-hash dedup to prevent duplicates during cross-machine sync
+        match workspace.write_dedup(&path, &content).await {
+            Ok(true) => tracing::info!("Saved thread to workspace: {}", path),
+            Ok(false) => tracing::debug!("Session file deduplicated (already exists): {}", path),
+            Err(e) => {
+                // Fall back to regular write if dedup fails (e.g., no postgres)
+                tracing::debug!("Dedup write failed, falling back to regular write: {}", e);
+                workspace.write(&path, &content).await.map_err(Error::from)?;
+                tracing::info!("Saved thread to workspace (fallback): {}", path);
+            }
+        }
         Ok(())
     }
 

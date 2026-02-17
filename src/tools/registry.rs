@@ -14,11 +14,13 @@ use crate::safety::SafetyLayer;
 use crate::secrets::SecretsStore;
 use crate::tools::builder::{BuildSoftwareTool, BuilderConfig, LlmSoftwareBuilder};
 use crate::tools::builtin::{
-    ApplyPatchTool, CancelJobTool, CreateJobTool, EchoTool, HttpTool, JobStatusTool, JsonTool,
-    ListDirTool, ListJobsTool, MemoryReadTool, MemorySearchTool, MemoryTreeTool, MemoryWriteTool,
-    PythonTool, ReadFileTool, ShellTool, TaskCreateTool, TaskExportTool, TaskListTool,
-    TaskReadyTool, TaskUpdateTool, TimeTool, ToolActivateTool, ToolAuthTool, ToolInstallTool,
-    ToolListTool, ToolRemoveTool, ToolSearchTool, WriteFileTool,
+    ApplyPatchTool, CancelJobTool, CodeFilesTool, CodeReadTool, CodeSearchTool, CreateJobTool,
+    EchoTool, HttpTool, JobStatusTool, JsonTool, LearningCreateTool, LearningPromoteTool,
+    LearningSearchTool, ListDirTool, ListJobsTool, MemoryReadTool, MemorySearchTool,
+    MemoryTreeTool, MemoryWriteTool, PythonTool, ReadFileTool, ShellTool, TaskArchiveTool,
+    TaskCreateTool, TaskExportTool, TaskListTool, TaskReadyTool, TaskUpdateTool, TilthState,
+    TimeTool, ToolActivateTool, ToolAuthTool, ToolInstallTool, ToolListTool, ToolRemoveTool,
+    ToolSearchTool, WriteFileTool,
 };
 use crate::tools::tool::{Tool, ToolDomain};
 use crate::tools::wasm::{
@@ -26,6 +28,7 @@ use crate::tools::wasm::{
     WasmToolStore, WasmToolWrapper,
 };
 use crate::workspace::Workspace;
+use crate::workspace::learnings::LearningRepository;
 use crate::workspace::tasks::TaskRepository;
 
 /// Names of built-in tools that cannot be shadowed by dynamic registrations.
@@ -67,6 +70,13 @@ const PROTECTED_TOOL_NAMES: &[&str] = &[
     "task_update",
     "task_ready",
     "task_export",
+    "task_archive",
+    "learning_create",
+    "learning_search",
+    "learning_promote",
+    "code_read",
+    "code_search",
+    "code_files",
 ];
 
 /// Registry of available tools.
@@ -347,8 +357,36 @@ impl ToolRegistry {
             agent_id,
             user_id.clone(),
         )));
-        self.register_sync(Arc::new(TaskExportTool::new(repo, user_id)));
-        tracing::info!("Registered 5 task management tools");
+        self.register_sync(Arc::new(TaskExportTool::new(
+            Arc::clone(&repo),
+            user_id.clone(),
+        )));
+        self.register_sync(Arc::new(TaskArchiveTool::new(repo, user_id)));
+        tracing::info!("Registered 6 task management tools");
+    }
+
+    /// Register learning tools for the evidence-backed learnings system.
+    ///
+    /// Learning tools allow agents to create, search, and promote learnings
+    /// (actionable rules derived from experience). Stored in PostgreSQL.
+    pub fn register_learning_tools(&self, repo: Arc<LearningRepository>) {
+        self.register_sync(Arc::new(LearningCreateTool::new(Arc::clone(&repo))));
+        self.register_sync(Arc::new(LearningSearchTool::new(Arc::clone(&repo))));
+        self.register_sync(Arc::new(LearningPromoteTool::new(repo)));
+        tracing::info!("Registered 3 learning tools");
+    }
+
+    /// Register AST-aware code intelligence tools (tilth).
+    ///
+    /// These provide smart file reading (outline/full), symbol search (definitions
+    /// first via tree-sitter), and glob file finding with token estimates.
+    /// The shared `TilthState` holds an outline cache that persists across
+    /// invocations for session-level deduplication.
+    pub fn register_code_tools(&self, state: TilthState) {
+        self.register_sync(Arc::new(CodeReadTool::new(state.clone())));
+        self.register_sync(Arc::new(CodeSearchTool::new(state.clone())));
+        self.register_sync(Arc::new(CodeFilesTool::new(state)));
+        tracing::info!("Registered 3 code intelligence tools (tilth)");
     }
 
     /// Register the software builder tool.

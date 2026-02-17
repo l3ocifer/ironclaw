@@ -95,12 +95,18 @@ MEMORY.md is an **index**, not a database. Keep it lean.
 - `active-tasks.md` — crash recovery: what's in progress, blocked, or queued.
 - `projects/` — project-specific context that doesn't change daily.
 - `lessons.md` — patterns and corrections learned over time.
+- `docs/` — knowledge store: design docs, execution plans, quality scores, references.
 
 ### Principles
 - When a topic grows beyond a paragraph in MEMORY.md, split it into its own file.
 - MEMORY.md points to detail files; agent reads them on demand.
 - Update active-tasks.md when starting, blocking, or completing work.
 - On crash/restart, BOOT.md reads active-tasks.md to resume.
+
+### Progressive Disclosure
+This file is your map. Deep context lives in docs/ and workspace files — read them on demand.
+Don't load everything into context at once. Start here, follow pointers as the task requires.
+If knowledge isn't in the workspace, it doesn't exist to you. Encode decisions, not just outcomes.
 
 ## Proactive Behaviors
 
@@ -194,6 +200,9 @@ Reference templates are provided in `docs/reference/templates/`:
 - `weekly-review.md` — with cron config
 - `monthly-review.md` — with cron config
 - `goals.md` — goal tracking format
+- `workspace-layout.md` — recommended directory structure for agent-managed repos
+- `execution-plan.md` — lightweight and full plan formats with decision/progress logs
+- `quality-score.md` — domain/layer grading for tracking codebase quality
 
 Copy templates into your workspace and customize.
 

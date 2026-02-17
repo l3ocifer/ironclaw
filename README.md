@@ -56,8 +56,16 @@ IronClaw is the AI assistant you can actually trust with your personal and profe
 - **Dynamic Tool Building** - Describe what you need, and IronClaw builds it as a WASM tool
 - **MCP Protocol** - Connect to Model Context Protocol servers for additional capabilities
 - **Plugin Architecture** - Drop in new WASM tools and channels without restarting
-- **Agent Skills** - 58 bundled skills with progressive loading (only name + description in context; full instructions on demand)
+- **Agent Skills** - 97 bundled skills with progressive loading (only name + description in context; full instructions on demand)
 - **Sandboxed Python** - Execute Python code safely via [monty](https://github.com/pydantic/monty) with resource limits (no I/O, no network)
+
+### Intelligent LLM Routing
+
+- **15-Dimension Classifier** - Weighted scoring across token count, code presence, reasoning markers, technical terms, agentic task detection, and more
+- **Local-First** - Routes Simple/Medium requests to local Ollama models; Complex/Reasoning falls back to cloud (Claude Opus 4.6)
+- **4 Profiles** - Auto (with agentic detection), Eco, Premium, Free
+- **Session Pinning** - Reuses model within a session; rate-limit cooldown for failed providers
+- **22-Model Catalog** - OpenAI, Anthropic, Google, DeepSeek, Moonshot, xAI, NVIDIA, Ollama
 
 ### Persistent Memory
 
@@ -65,12 +73,14 @@ IronClaw is the AI assistant you can actually trust with your personal and profe
 - **Workspace Filesystem** - Flexible path-based storage for notes, logs, and context
 - **Identity Files** - Maintain consistent personality and preferences across sessions
 - **Semantic Merge** - Entity-level 3-way merge via [weave-core](https://github.com/Ataraxy-Labs/weave) for concurrent multi-agent edits
+- **Token Compression** - 5-stage deterministic pipeline (observations, dedup, dictionary, patterns, text opt)
 
 ### Multi-Agent Coordination
 
 - **Task Graph** - PostgreSQL-backed DAG for task dependencies, priorities, and assignment across agents
 - **Agent Identity** - Per-agent `AGENT_ID` for task scoping and workspace isolation
 - **JSONL Export** - Beads-compatible task export/import for interoperability
+- **Memory Decay** - Automatic archival of old completed tasks
 
 ## Installation
 
@@ -289,6 +299,83 @@ cargo test test_name
 - **Telegram channel**: See [docs/TELEGRAM_SETUP.md](docs/TELEGRAM_SETUP.md) for setup and DM pairing.
 - **Changing channel sources**: Run `./channels-src/telegram/build.sh` before `cargo build` so the updated WASM is bundled.
 
+## LLM Provider Configuration
+
+IronClaw supports 6 LLM backends with local-first routing. Set `LLM_BACKEND` env var or `llm_backend` in settings.
+
+| Backend | Value | Default Model | Notes |
+|---------|-------|---------------|-------|
+| NEAR AI | `nearai` | `llama4-maverick-instruct-basic` | Session or API key auth |
+| Ollama (local) | `ollama` | `qwen3-coder:30b` | Zero cost, runs on Frack/Frick |
+| OpenAI | `openai` | `gpt-5.3-codex` | GPT-4o/4.1/o4-mini retired Feb 2026 |
+| Anthropic | `anthropic` | `claude-opus-4.6` | 1M context (beta), 128K output |
+| Gemini | `gemini` | `gemini-2.5-pro` | 1M+ context |
+| OpenAI-compatible | `openai_compatible` | `default` | Any endpoint speaking OpenAI API |
+
+The intelligent router (`ROUTING_PROFILE=auto|eco|premium|free`) automatically classifies requests and routes to the optimal model. Local Ollama models handle simple/medium tasks; cloud models (Opus 4.6) handle complex/reasoning tasks.
+
+## Reference Repositories
+
+IronClaw draws on 24 reference repositories for algorithms, patterns, and skills. These are cloned into `examples/reference-repos/` for analysis — they are **not** runtime dependencies.
+
+### Current Reference Repos
+
+| Repository | Directory | What Was Adopted |
+|-----------|-----------|------------------|
+| [dcg](https://github.com/Dicklesworthstone/destructive_command_guard) | `dcg/` | Command guard — 20 security packs ported to Rust |
+| [claw-compactor](https://github.com/aeromomo/claw-compactor) | `claw-compactor/` | 5-stage token compression pipeline ported to Rust |
+| [clawsec](https://github.com/prompt-security/clawsec) | `clawsec/` | Workspace integrity monitor (SHA-256 drift detection) |
+| [weave](https://github.com/Ataraxy-Labs/weave) | `weave/` | Vendored `weave-core` for semantic 3-way merge |
+| [monty](https://github.com/pydantic/monty) | `monty/` | Sandboxed Python interpreter with external function bridge |
+| [beads](https://github.com/steveyegge/beads) | `beads/` | Task dependency graph concepts + memory decay |
+| [aline](https://github.com/human-re/GCC) | `aline/` | Git-backed memory patterns (reference) |
+| [OneContext](https://github.com/TheAgentContextLab/OneContext) | `OneContext/` | Multi-agent context handoff patterns (reference) |
+| [ClawRouter](https://github.com/BlockRunAI/ClawRouter) | `ClawRouter/` | Intelligent LLM router (15-dim classifier) fully ported to Rust |
+| [pi-skills](https://github.com/badlogic/pi-skills) | `pi-skills/` | 4 skills adopted (brave-search, gccli, gdcli, youtube-transcript) |
+| [ralph](https://github.com/snarktank/ralph) | `ralph/` | PRD-driven patterns → prd-generator skill |
+| [compound-product](https://github.com/snarktank/compound-product) | `compound-product/` | Report analysis → report-analyzer, task-breakdown skills |
+| [pIRS](https://github.com/nickslevine/pIRS) | `pIRS/` | Tool usage analytics patterns (reference) |
+| [homeassistant-skill](https://github.com/komal-SkyNET/claude-skill-homeassistant) | `homeassistant-skill/` | Home Assistant skill copied |
+| [arscontexta](https://github.com/agenticnotetaking/arscontexta) | `arscontexta/` | 10 knowledge management skills copied |
+| [next-plaid](https://github.com/lightonai/next-plaid) | `next-plaid/` | ColGREP semantic code search skill + multi-vector patterns (reference) |
+| [solana-dev-skill](https://github.com/solana-foundation/solana-dev-skill) | `solana-dev-skill/` | Solana development skill with 10 sub-docs |
+| [gemini-skills](https://github.com/google-gemini/gemini-skills) | `gemini-skills/` | Gemini API development skill |
+| [webgpu-skill](https://github.com/dgreenheck/webgpu-claude-skill) | `webgpu-skill/` | WebGPU/Three.js/TSL skill with docs + examples |
+| [asc-skills](https://github.com/rudrankriyam/app-store-connect-cli-skills) | `asc-skills/` | 13 App Store Connect automation skills |
+| [compound-engineering](https://github.com/EveryInc/compound-engineering-plugin) | `compound-engineering/` | Coding tutor + engineering skills |
+| [youtube-clipper](https://github.com/op7418/Youtube-clipper-skill) | `youtube-clipper/` | Video processing pipeline skill |
+| [kiss_ai](https://github.com/ksenxx/kiss_ai) | `kiss_ai/` | Evolutionary optimization patterns (reference) |
+| [genai-toolbox](https://github.com/googleapis/genai-toolbox) | `genai-toolbox/` | MCP Toolbox for Databases — structured DB tools via MCP |
+| [contrail](https://github.com/strangeloopcanon/contrail) | `contrail/` | Session flight recorder — learnings system, salience scoring, context packs, cross-machine merge |
+
+### Adding a New Reference Repository
+
+Follow this process to evaluate and integrate a new reference repo:
+
+1. **Clone** into `examples/reference-repos/`:
+   ```bash
+   cd examples/reference-repos
+   git clone --depth 1 <repo-url> <short-name>
+   ```
+
+2. **Assess** — Read all SKILL.md files, READMEs, and source code. Determine:
+   - Does it provide skills, algorithms, or architectural patterns?
+   - Is anything already covered by IronClaw's existing capabilities?
+   - What is the effort to integrate (trivial skill copy vs Rust port)?
+
+3. **Adopt** what's useful:
+   - **Skills** (SKILL.md format): Copy to `skills/<name>/` with IronClaw-compatible frontmatter
+   - **Algorithms**: Port to Rust in the appropriate `src/` module
+   - **Patterns**: Document in `docs/INTEGRATION_PLAN.md` for future reference
+
+4. **Document** the assessment:
+   - Add a section in `docs/INTEGRATION_PLAN.md` (section 2.x)
+   - Update `FEATURE_PARITY.md` if new capabilities were added
+   - Update `CLAUDE.md` project context
+   - Update this README's reference repos table
+
+5. **Do not** add the reference repo as a Cargo dependency — it's reference material only. If code needs to be used, vendor it or port it to Rust.
+
 ## OpenClaw Heritage
 
 IronClaw is a Rust reimplementation inspired by [OpenClaw](https://github.com/openclaw/openclaw). See [FEATURE_PARITY.md](FEATURE_PARITY.md) for the complete tracking matrix and [CLAUDE.md](CLAUDE.md) for full project context.
@@ -299,10 +386,11 @@ Key differences:
 - **WASM sandbox vs Docker** - Lightweight, capability-based security
 - **PostgreSQL vs SQLite** - Production-ready persistence
 - **Security-first design** - Multiple defense layers, credential protection
+- **Intelligent router** - 15-dimension classifier with local-first model routing
+- **97 bundled skills** - From 24 reference repos, auto-discovered
+- **Token compression** - 5-stage deterministic pipeline
 
 ### Memory Features (from OpenClaw)
-
-The following memory and session persistence features have been ported from OpenClaw:
 
 - **Session save on `/new`** - Current conversation saved to `daily/` before starting a new thread
 - **Pre-compaction memory flush** - Silent LLM turn before compaction to persist durable notes
@@ -310,7 +398,18 @@ The following memory and session persistence features have been ported from Open
 - **Logseq integration** - Personal knowledge graph injected into agent context at bootstrap
 - **Recommended AGENTS.md template** - Operating instructions for memory-first agent behavior
 
-See [docs/MEMORY_TRANSFER_PLAN.md](docs/MEMORY_TRANSFER_PLAN.md) for the transfer plan and [docs/INTEGRATION_PLAN.md](docs/INTEGRATION_PLAN.md) for the full roadmap including reference repo integration.
+## Documentation
+
+| Document | Purpose |
+|----------|---------|
+| [CLAUDE.md](CLAUDE.md) | Full project context for AI assistants (architecture, config, security, roadmap) |
+| [FEATURE_PARITY.md](FEATURE_PARITY.md) | OpenClaw ↔ IronClaw feature tracking matrix |
+| [AGENTS.md](AGENTS.md) | Agent operating rules |
+| [docs/INTEGRATION_PLAN.md](docs/INTEGRATION_PLAN.md) | Reference repo integration plan + roadmap (24 repos assessed) |
+| [docs/REMAINING_INTEGRATION_WORK.md](docs/REMAINING_INTEGRATION_WORK.md) | Detailed remaining tasks |
+| [docs/MEMORY_TRANSFER_PLAN.md](docs/MEMORY_TRANSFER_PLAN.md) | OpenClaw → IronClaw memory feature transfer plan |
+| [docs/reference/AGENTS.recommended.md](docs/reference/AGENTS.recommended.md) | Recommended AGENTS.md template for workspace setup |
+| [docs/TELEGRAM_SETUP.md](docs/TELEGRAM_SETUP.md) | Telegram channel setup and DM pairing |
 
 ## License
 

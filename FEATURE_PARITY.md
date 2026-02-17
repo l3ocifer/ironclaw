@@ -139,7 +139,7 @@ This document tracks feature parity between IronClaw (Rust implementation) and O
 | Session pruning | ✅ | ❌ | Auto cleanup old sessions |
 | Context compaction | ✅ | ✅ | Auto summarization |
 | Custom system prompts | ✅ | ✅ | Template variables |
-| Skills (modular capabilities) | ✅ | ✅ | Multi-source discovery, eligibility, progressive disclosure |
+| Skills (modular capabilities) | ✅ | ✅ | 97 bundled skills: multi-source discovery, eligibility, progressive disclosure |
 | Thinking modes (low/med/high) | ✅ | ❌ | Configurable reasoning depth |
 | Block-level streaming | ✅ | ❌ | |
 | Tool-level streaming | ✅ | ❌ | |
@@ -165,8 +165,8 @@ This document tracks feature parity between IronClaw (Rust implementation) and O
 | Anthropic (Claude) | ✅ | 🚧 | - | Via NEAR AI proxy |
 | OpenAI | ✅ | 🚧 | - | Via NEAR AI proxy |
 | AWS Bedrock | ✅ | ❌ | P3 | |
-| Google Gemini | ✅ | ❌ | P3 | |
-| OpenRouter | ✅ | ❌ | P3 | |
+| Google Gemini | ✅ | ✅ | - | via `rig::providers::gemini` (full support) |
+| OpenRouter | ✅ | ✅ | - | Native intelligent router (`src/llm/router.rs`) — 15-dimension weighted classification, 4 profiles (auto/eco/premium/free), session pinning, rate-limit cooldown, agentic detection |
 | Ollama (local) | ✅ | ✅ | - | via `rig::providers::ollama` (full support) |
 | node-llama-cpp | ✅ | ➖ | - | N/A for Rust |
 | llama.cpp (native) | ❌ | 🔮 | P3 | Rust bindings |
@@ -177,7 +177,7 @@ This document tracks feature parity between IronClaw (Rust implementation) and O
 |---------|----------|----------|-------|
 | Auto-discovery | ✅ | ❌ | |
 | Failover chains | ✅ | ✅ | `FailoverProvider` with configurable `fallback_model` |
-| Cooldown management | ✅ | ❌ | Skip failed providers |
+| Cooldown management | ✅ | ✅ | Router tracks 60s cooldowns for rate-limited models |
 | Per-session model override | ✅ | ✅ | Model selector in TUI |
 | Model selection UI | ✅ | ✅ | TUI keyboard shortcut |
 
@@ -431,7 +431,7 @@ This document tracks feature parity between IronClaw (Rust implementation) and O
 - ✅ WebChat channel (web gateway)
 - 🚧 Media handling (caption support; no image/PDF processing)
 - 🚧 CLI subcommands (onboard, config, status, memory done; doctor ❌)
-- ❌ Ollama/local model support
+- ✅ Ollama/local model support (default: qwen3-coder:30b)
 - ❌ Configuration hot-reload
 - ❌ Webhook trigger endpoint in web gateway
 
@@ -442,7 +442,7 @@ This document tracks feature parity between IronClaw (Rust implementation) and O
 - ❌ Other messaging platforms
 - ❌ TTS/audio features
 - ❌ Video support
-- ✅ Skills system (src/skills/, SKILL.md discovery from 6 sources, eligibility, progressive loading)
+- ✅ Skills system (97 skills in src/skills/, SKILL.md discovery from 6 sources, eligibility, progressive loading)
 - ❌ Plugin registry
 
 ---
@@ -472,9 +472,33 @@ IronClaw intentionally differs from OpenClaw in these ways:
 4. **NEAR AI focus**: Primary provider with session-based auth
 5. **No mobile/desktop apps**: Focus on server-side and CLI initially
 6. **WASM channels**: Novel extension mechanism not in OpenClaw
-7. **Sandboxed Python**: monty — Rust-native Python interpreter with resource limits
-8. **Task graph**: PostgreSQL DAG for multi-agent coordination (beads-inspired)
-9. **Semantic merge**: weave-core entity-level 3-way merge for concurrent workspace edits
-10. **Bundled skills**: 57 skills bundled in repo, auto-discovered from exe/env/CWD
+7. **Sandboxed Python**: monty — Rust-native Python interpreter with resource limits + external function bridge
+8. **Task graph**: PostgreSQL DAG for multi-agent coordination (beads-inspired) + memory decay archival
+9. **Semantic merge**: weave-core entity-level 3-way merge, wired into workspace write path for auto-merge
+10. **Bundled skills**: 97 skills bundled in repo, auto-discovered from exe/env/CWD
+11. **Token compression**: 5-stage deterministic pipeline (observations, dedup, dictionary, patterns, text opt) + salience scoring wired into compaction
+12. **Command guard**: 20 security packs covering git, filesystem, database, containers, cloud, system, storage, secrets, remote, CI/CD, networking, DNS, backup, messaging, search, package managers, env vars
+13. **Integrity monitor**: SHA-256 workspace file drift detection, wired into heartbeat cycle
+14. **Intelligent LLM router**: 15-dimension weighted classifier, 4 routing profiles, 24-model catalog, session pinning, rate-limit cooldown, agentic auto-detection, cost estimation with savings tracking
+15. **Database MCP tooling**: [genai-toolbox](https://github.com/googleapis/genai-toolbox) assessed for structured DB tools via MCP sidecar (Phase 6 — K3s deployment)
+16. **BOOT.md on startup**: Runs workspace BOOT.md as first agent turn with full tool access on gateway start
+17. **Memory flush with tools**: Pre-compaction flush executes memory tools (memory_write, memory_read, memory_search, memory_append) in a loop (max 3 iterations)
+18. **Daily session reset**: Auto-resets sessions at configurable hour boundary (default: disabled, set `daily_reset_hour` 0-23)
+19. **Learnings system**: Evidence-backed rules with confidence scoring, observation counting, dedup, lifecycle (candidate→active→deprecated), 3 LLM tools, active learnings injected into system prompt
+20. **Salience scoring**: Turn/session importance scoring for intelligent compaction (preserves high-salience turns verbatim, summarizes low-salience)
+21. **Cross-machine session merge**: Content-hash dedup prevents duplicate session files during Frack↔Frick database sync
 
 These are intentional architectural choices, not gaps to be filled.
+
+### Reference Repo Count
+
+25 repositories assessed in `examples/reference-repos/`. See [docs/INTEGRATION_PLAN.md](docs/INTEGRATION_PLAN.md) for full assessment of each.
+
+### Roadmap from Reference Repos
+
+| Pattern | Source | Priority | Status |
+|---------|--------|----------|--------|
+| Learnings system (evidence-backed rules) | contrail | Phase 6b | ✅ Done — PostgreSQL-backed with 3 LLM tools + prompt injection |
+| Salience scoring for compaction | contrail | Phase 6b | ✅ Done — turn/session scoring, salience-based partition in compaction |
+| Cross-machine session merge | contrail | Phase 6b | ✅ Done — content-hash dedup on session save |
+| Database MCP toolbox | genai-toolbox | Phase 6 | Planned |

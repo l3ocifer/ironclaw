@@ -1,8 +1,8 @@
 # Integration Plan: Reference Repos + OpenClaw Gaps → IronClaw
 
-**Status:** Partially implemented. Phase 1 (security hardening), Phase 2 (compressor — partial), and Phase 4 (weave, monty, task graph) are done. Remaining items proceed section by section.  
+**Status:** Substantially complete. Phase 1 (security — 20 packs, integrity wired into heartbeat), Phase 2 (5-stage compressor wired into compaction), Phase 4 (weave + auto-merge, monty + external fns, task graph + memory decay) are done. Intelligent LLM router ported from ClawRouter (15-dimension classifier, 4 profiles, 24 models, session pinning). 97 bundled skills from 23 reference repos. Remaining: OpenClaw gaps (BOOT.md, memory flush with tools, daily reset). See `docs/REMAINING_INTEGRATION_WORK.md` for details.  
 **Principle:** Everything in Rust. Security is the highest priority. IronClaw's design philosophy leads.  
-**Date:** 2026-02-13
+**Date:** 2026-02-17
 
 ---
 
@@ -351,6 +351,196 @@ Add as an alternative sandbox alongside WASM for executing Python code.
 
 **IronClaw relevance:** Session archiving maps to workspace session files. Multi-agent handoff is relevant for Frack↔Frick but needs custom design around shared PostgreSQL.
 
+### 2.9 pi-skills — Agent Skill Collection (Done — Selective)
+
+**Repo:** `examples/reference-repos/pi-skills/` | **Language:** JavaScript | **Effort:** Trivial (copy)
+
+**What it provides:** A collection of CLI-based agent skills for web search, Google Workspace, browser automation, transcription, and YouTube transcripts. Compatible with Claude Code, Codex CLI, and similar agents.
+
+**What was adopted (4 of 8 skills):**
+- `brave-search` — Web search + content extraction via Brave Search API. No equivalent existed in IronClaw.
+- `gccli` — Google Calendar CLI (list/create/update events, check availability). No equivalent.
+- `gdcli` — Google Drive CLI (list/search/upload/download/share files). No equivalent.
+- `youtube-transcript` — Fetch YouTube video transcripts for summarization. No equivalent.
+
+**What was skipped (redundant):**
+- `transcribe` — IronClaw already has `openai-whisper` and `openai-whisper-api` skills
+- `gmcli` — IronClaw already has `himalaya` skill (IMAP/SMTP, more universal than Gmail-only)
+- `browser-tools` — IronClaw uses Cursor MCP browser tools / built-in browser automation
+- `vscode` — Already running in Cursor IDE which provides this natively
+
+### 2.10 ralph — PRD-Driven Autonomous Loop (Done — Patterns Adopted)
+
+**Repo:** `examples/reference-repos/ralph/` | **Language:** Shell/TypeScript | **Effort:** Trivial (skill creation)
+
+**What it provides:** An autonomous agent loop that executes PRD items until all pass. Fresh context per iteration, memory via git history and progress files, AGENTS.md auto-update.
+
+**What was adopted:**
+- `prd-generator` skill — Structured PRD creation with clarifying questions, verifiable acceptance criteria, and proper story sizing
+- `task-breakdown` skill — Granular task explosion (8-15 tasks per PRD), investigation/implementation separation, boolean pass/fail criteria
+
+**What was skipped (redundant):**
+- Autonomous loop — IronClaw has routine engine + heartbeat for autonomous execution
+- Task tracking — IronClaw has PostgreSQL-backed task graph with dependencies
+- Session persistence — IronClaw has workspace memory + session save
+- Progress.txt pattern — IronClaw has daily logs and MEMORY.md
+
+### 2.11 compound-product — Self-Improving Product System (Done — Patterns Adopted)
+
+**Repo:** `examples/reference-repos/compound-product/` | **Language:** Shell | **Effort:** Trivial (skill creation)
+
+**What it provides:** A self-improving system that reads daily reports, identifies priorities, and autonomously implements fixes. Report analysis → PRD → task explosion → execution loop → PR creation.
+
+**What was adopted:**
+- `report-analyzer` skill — Analyze reports (metrics, errors, feedback) to identify #1 actionable priority with structured impact ranking
+- Task granularity patterns — Incorporated into `task-breakdown` skill (one concern per task, investigation vs implementation separation)
+
+**What was skipped (redundant):**
+- Execution loop — IronClaw has routine engine
+- Scheduling (launchd) — IronClaw has cron-based routine engine
+- PRD skill — Adopted from ralph's more detailed version
+- Branch/PR creation — Out of scope for skill layer
+
+### 2.12 pIRS — Tool Usage Analytics (Reference Only)
+
+**Repo:** `examples/reference-repos/pIRS/` | **Language:** TypeScript | **Effort:** Medium
+
+**What it provides:** Pi extension that tracks tool invocations and estimates token usage from command outputs. Live TUI widget, command grouping, session persistence, export.
+
+**What was noted for future adoption:**
+- Tool output token estimation (IronClaw tracks LLM tokens but not tool output size)
+- Command/tool grouping for analytics
+- TUI status widgets for real-time visibility
+
+**Not adopted now:** Requires deeper integration into ActionRecord/tool execution pipeline. IronClaw already has cost tracking and tool execution history. Would be a Phase 5 enhancement.
+
+### 2.13 ClawRouter — Intelligent LLM Routing (Done — Ported to Rust)
+
+**Repo:** `examples/reference-repos/ClawRouter/` | **Language:** TypeScript | **Effort:** Medium
+
+**What it provides:**
+- 15-dimension weighted scoring system for request complexity classification (token count, code presence, reasoning markers, technical terms, creative markers, simple indicators, multi-step patterns, question complexity, imperative verbs, constraints, output format, references, negation, domain specificity, agentic task detection)
+- 4 routing profiles: auto (with agentic auto-detection), eco, premium, free
+- 4 complexity tiers: SIMPLE, MEDIUM, COMPLEX, REASONING
+- Model catalog with 24+ models across 7 providers (OpenAI, Anthropic, Google, DeepSeek, Moonshot, xAI, NVIDIA)
+- Session pinning (reuse model within a session)
+- Rate-limit cooldown tracking (60s per model)
+- Cost estimation with savings calculation vs Claude Opus 4.5 baseline
+- Fallback chains filtered by context window and cooldown state
+
+**What was adopted (full port):**
+- Complete 15-dimension classifier ported to Rust (`src/llm/router.rs`)
+- All 4 routing profiles with tier→model mappings
+- 24-model catalog with pricing, context windows, and capability flags
+- Session pinning, rate-limit cooldowns, cost estimation
+- Configuration via `settings.rs` (routing_profile, routing_force_agentic, routing_session_pinning) and env vars (ROUTING_PROFILE, etc.)
+- Integrated into `Config` struct (`config.router`)
+- 12 unit tests covering all classification paths
+
+**What was skipped:**
+- LLM fallback classifier (dormant in ClawRouter; defaults to MEDIUM for ambiguous cases)
+- OpenRouter API proxy (IronClaw routes internally, not as an external proxy)
+- Multilingual keyword lists (English only for now; extensible)
+
+### 2.14 claude-skill-homeassistant — Home Automation Skill (Done — Copied)
+
+**Repo:** `examples/reference-repos/homeassistant-skill/` | **Language:** SKILL.md | **Effort:** Trivial
+
+**What it provides:** Detailed Home Assistant REST API instructions for an AI agent — entity control, automations, scenes, energy monitoring, person tracking.
+
+**Adopted:** Copied to `skills/homeassistant/`. Supplements existing `mcp-devops-tools` which has HA MCP tools but less instructional depth.
+
+### 2.15 arscontexta — Knowledge Management System (Done — Skills Copied)
+
+**Repo:** `examples/reference-repos/arscontexta/` | **Language:** Shell/SKILL.md | **Effort:** Trivial
+
+**What it provides:** Self-evolving PKM system with 10 skills: domain management, architecture, health checks, recommendations, tutorials, upgrades, setup, seeding, asking questions, and help. Uses Maps of Content (MOCs), processing pipelines (reduce/reflect/reweave), and hooks.
+
+**Adopted:** All 10 skills copied to `skills/arscontexta-*/`. Knowledge management patterns (MOCs, processing pipelines) noted for future Logseq integration enhancement.
+
+**Roadmap items identified:**
+- MOC auto-generation from workspace memory (Phase 5)
+- Processing pipeline hooks (reduce→reflect→reweave) for memory compaction (Phase 5)
+
+### 2.16 kiss_ai — Evolutionary Optimization (Reference Only)
+
+**Repo:** `examples/reference-repos/kiss_ai/` | **Language:** Python | **Effort:** Hard
+
+**What it provides:** Evolutionary optimization framework — genetic mutation/crossover of code and prompts. Fitness functions, population management, LLM-powered evolution.
+
+**Not adopted:** Requires significant Rust porting effort. Concepts (prompt evolution, code mutation) are interesting for future autonomous improvement but not needed now. Marked for Phase 5.
+
+### 2.17 next-plaid / ColGREP — Semantic Code Search (Reference + Skill)
+
+**Repo:** `examples/reference-repos/next-plaid/` | **Language:** Rust | **Effort:** Medium (for deep integration)
+
+**What it provides:**
+- ColGREP: local semantic code search combining tree-sitter AST parsing + ColBERT multi-vector embeddings + grep
+- NextPlaid: multi-vector database engine with REST API
+- 25 language support including Rust
+- Fully local (no API key)
+
+**Adopted:**
+- `colgrep` skill copied to `skills/colgrep/` for agent instruction on CLI usage
+- Multi-vector embedding pattern noted for workspace memory upgrade
+
+**Roadmap items identified:**
+- Replace single-vector pgvector search with ColBERT multi-vector search (Phase 5)
+- Structured code representation before embedding (signature, params, calls, docstring) (Phase 5)
+- Incremental index with file-change detection (Phase 5)
+
+### 2.18 solana-dev-skill — Blockchain Development (Done — Skill Copied)
+
+**Repo:** `examples/reference-repos/solana-dev-skill/` | **Language:** SKILL.md | **Effort:** Trivial
+
+**What it provides:** End-to-end Solana development playbook with 10 progressive-disclosure sub-documents covering Anchor, Pinocchio (zero-dep Rust), testing, IDL codegen, payments, confidential transfers, and a comprehensive security checklist.
+
+**Adopted:** Full skill with all sub-docs copied to `skills/solana-dev/`.
+
+### 2.19 gemini-skills — Gemini API Development (Done — Skill Copied)
+
+**Repo:** `examples/reference-repos/gemini-skills/` | **Language:** SKILL.md | **Effort:** Trivial
+
+**What it provides:** Current Gemini 3 model names, SDK patterns, function calling, structured output, context caching, multimodal capabilities. Includes `llms.txt` discovery pattern.
+
+**Adopted:** Copied to `skills/gemini-api-dev/`. Critical for keeping Gemini backend integration current.
+
+### 2.20 webgpu-threejs-tsl — GPU/3D Development (Done — Skill Copied)
+
+**Repo:** `examples/reference-repos/webgpu-skill/` | **Language:** SKILL.md | **Effort:** Trivial
+
+**What it provides:** WebGPU Three.js development with TSL (TypeScript Shader Language). GPU compute shaders, post-processing, materials, WGSL integration.
+
+**Adopted:** Full skill with docs, examples, and templates copied to `skills/webgpu-threejs-tsl/`.
+
+### 2.21 asc-skills — App Store Connect Automation (Done — 13 Skills Copied)
+
+**Repo:** `examples/reference-repos/asc-skills/` | **Language:** SKILL.md | **Effort:** Trivial
+
+**What it provides:** Complete Apple ecosystem automation: app creation, build lifecycle, CLI usage, ID resolution, metadata sync, notarization, pricing, release flow, screenshot pipeline, signing setup, submission health, subscription localization, TestFlight orchestration.
+
+**Adopted:** All 13 skills copied to `skills/asc-*/`. Useful for macOS app distribution and browser automation patterns.
+
+### 2.22 compound-engineering — Multi-Agent Orchestration (Done — Skills Copied)
+
+**Repo:** `examples/reference-repos/compound-engineering/` | **Language:** TypeScript | **Effort:** Trivial (skills)
+
+**What it provides:** Multi-agent orchestration patterns, coding tutor, parallel PR resolution. Uses Claude + Cursor integration.
+
+**Adopted:** `compound-coding-tutor` and `compound-compound-engineering` skills copied.
+
+**Concepts noted for roadmap:**
+- Parallel PR resolution pattern (multiple agents working on different PRs) (Phase 5)
+- Multi-agent orchestration with shared context (Phase 5)
+
+### 2.23 youtube-clipper — Video Processing Pipeline (Done — Skill Copied)
+
+**Repo:** `examples/reference-repos/youtube-clipper/` | **Language:** Shell/SKILL.md | **Effort:** Trivial
+
+**What it provides:** Full YouTube video processing: download, transcription, clip extraction, timestamp detection. Goes beyond basic transcript fetching.
+
+**Adopted:** Full skill copied to `skills/youtube-clipper/`. Complements existing `youtube-transcript` skill with video processing capabilities.
+
 ---
 
 ## 3. Implementation Roadmap
@@ -401,6 +591,16 @@ Add as an alternative sandbox alongside WASM for executing Python code.
 - Git-backed workspace versioning (aline concepts)
 - Multi-agent context handoff (OneContext concepts)
 - LLM slug for session save filenames
+- ColBERT multi-vector search for workspace memory (next-plaid/colgrep concepts)
+- Structured code representation before embedding — AST-aware chunking (colgrep patterns)
+- Incremental memory index with file-change detection (colgrep patterns)
+- MOC auto-generation from workspace memory (arscontexta concepts)
+- Processing pipeline hooks: reduce→reflect→reweave for memory (arscontexta patterns)
+- Evolutionary prompt/code optimization (kiss_ai concepts)
+- Parallel multi-agent PR resolution (compound-engineering patterns)
+- Video processing pipeline (youtube-clipper patterns, beyond transcripts)
+- Tool output token estimation and analytics (pIRS patterns)
+- `llms.txt` convention for IronClaw documentation (gemini-skills pattern)
 
 ---
 
@@ -509,4 +709,232 @@ Every integration must pass this checklist before merging:
 
 ---
 
-*Plan completed 2026-02-13. Proceed with Phase 1 (security hardening) first.*
+---
+
+## 6. genai-toolbox (MCP Toolbox for Databases)
+
+**Repo**: [googleapis/genai-toolbox](https://github.com/googleapis/genai-toolbox)
+**Directory**: `examples/reference-repos/genai-toolbox/`
+**Language**: Go
+**License**: Apache-2.0
+
+### What It Is
+
+An open-source MCP server for databases (13k+ stars). Provides structured, LLM-friendly tools for database queries, connection pooling, auth, and observability — all exposed via the MCP protocol.
+
+### Relevance to IronClaw
+
+IronClaw already has:
+- MCP client support (`src/tools/mcp/`)
+- PostgreSQL backend for workspace/memory
+- Shell tool with ad-hoc `psql` access
+
+genai-toolbox would provide:
+- **Structured database tools** — query by name/description rather than raw SQL
+- **Connection pooling** — managed by the toolbox server, not per-agent connections
+- **Auth integration** — row-level security, parameterized queries with user context
+- **Schema-aware queries** — LLM sees table structure via tool descriptions
+- **Multi-database support** — PostgreSQL, MySQL, BigQuery, Spanner, Firestore, etc.
+- **OpenTelemetry** — built-in metrics and tracing
+
+### Assessment
+
+| Aspect | Verdict |
+|--------|---------|
+| Redundant with IronClaw? | Partially — IronClaw already queries PostgreSQL directly. But genai-toolbox adds structure, safety, and multi-DB support |
+| Integration effort | Low — deploy as sidecar on homelab (K3s), connect via existing MCP client |
+| Value-add | High for Frick (homelab agent) which manages multiple databases |
+| Risk | None — runs as separate process, connects via HTTP/MCP |
+
+### Recommended Integration
+
+**Priority**: Medium (Phase 6)
+
+1. **Deploy genai-toolbox on K3s** — Helm chart or simple Deployment + Service
+   - Configure `tools.yaml` with IronClaw's PostgreSQL as a source
+   - Add pre-built query tools for workspace search, task management, analytics
+2. **Connect via MCP** — IronClaw's existing MCP client connects to the toolbox's MCP endpoint
+3. **Add Homelab databases** — expose MongoDB, Redis, and other homelab data sources as structured tools
+4. **Row-level security** — use toolbox's auth integration to scope queries per-agent
+
+### Example `tools.yaml` for IronClaw
+
+```yaml
+kind: sources
+name: ironclaw-pg
+type: postgres
+host: localhost
+port: 5432
+database: ironclaw
+user: ironclaw
+password: ${IRONCLAW_DB_PASSWORD}
+
+---
+kind: tools
+name: search-workspace-entries
+type: postgres-sql
+source: ironclaw-pg
+description: Search workspace entries by content (full-text search).
+parameters:
+  - name: query
+    type: string
+    description: Search query text.
+statement: >
+  SELECT path, content, ts_rank(tsv, plainto_tsquery($1)) AS rank
+  FROM workspace_entries
+  WHERE tsv @@ plainto_tsquery($1)
+  ORDER BY rank DESC
+  LIMIT 20;
+
+---
+kind: tools
+name: list-active-tasks
+type: postgres-sql
+source: ironclaw-pg
+description: List active (pending/in-progress) tasks with priorities.
+parameters:
+  - name: agent_id
+    type: string
+    description: Agent ID to scope tasks to.
+statement: >
+  SELECT id, title, status, priority, assigned_agent
+  FROM tasks
+  WHERE (assigned_agent = $1 OR assigned_agent IS NULL)
+    AND status IN ('pending', 'in_progress')
+  ORDER BY priority DESC, created_at ASC;
+```
+
+### Not Ported
+
+genai-toolbox is written in Go — we do **not** port it to Rust. It runs as a standalone MCP server (sidecar deployment on K3s). IronClaw connects to it via the existing MCP client.
+
+---
+
+---
+
+## 7. contrail (Session Flight Recorder + Learnings)
+
+**Repo**: [strangeloopcanon/contrail](https://github.com/strangeloopcanon/contrail)
+**Directory**: `examples/reference-repos/contrail/`
+**Language**: Rust
+**License**: Not specified (assume MIT/Apache)
+
+### What It Is
+
+A local-first flight recorder for AI coding sessions. Records sessions from Cursor, Claude Code, Codex, and Gemini into a unified JSONL timeline with secret/PII redaction. Also provides per-repo context management ("memex") and an analysis dashboard.
+
+### Key Novel Patterns
+
+#### 1. Learnings System (`scrapers/learnings.rs`)
+
+Actionable rules derived from session history with a full lifecycle:
+
+- **Learning** struct: `rule` (imperative sentence), `scope` (repo/global/tool), `evidence` (links to source data), `confidence` (0.0–1.0), `status` (candidate→active→deprecated), `count`, `first_seen`/`last_seen`
+- **Evidence tracking**: Each learning links back to session files, commits, or event IDs that produced it
+- **Deduplication**: Normalizes rule text, merges duplicates (keeps earliest first_seen, latest last_seen, sums count, takes max confidence, merges evidence, prefers Active status)
+
+**IronClaw relevance**: IronClaw has `MEMORY.md` for curated long-term memory and the task graph for work items, but nothing like evidence-backed, confidence-scored, lifecycle-managed learnings. This could enable structured self-improvement:
+- Agent discovers a pattern → creates a `Candidate` learning
+- Pattern is seen again → confidence increases, count increments
+- Learning is validated → status promoted to `Active`
+- Agent uses learnings in system prompt → better decisions
+
+**Recommended integration**: Port `Learning`, `LearningScope`, `LearningStatus`, `EvidenceRef` to a new `src/workspace/learnings.rs` module. Store in PostgreSQL (not JSONL). Expose as tools: `learning_create`, `learning_promote`, `learning_search`. Include top-N active learnings in system prompt.
+
+#### 2. Salience Scoring (`analysis/salience.rs`)
+
+Weighted importance scoring for conversation turns and sessions:
+
+- **Turn scoring**: base 1.0 + question (+0.4) + error/fail/panic (+0.3) + TODO (+0.2) + long content (+0.2) + file_effects (+0.6) + interrupted (+0.5) + clipboard (+0.3)
+- **Session scoring**: sum of turn scores × recency boost (`1.0 + 0.5/(1+age_days)`)
+
+**IronClaw relevance**: IronClaw's compaction currently treats all turns equally. Integrating salience scoring would let compaction preserve high-value turns (errors, questions, file changes) while aggressively compacting low-value ones. The recency boost also matches the existing memory decay pattern.
+
+**Recommended integration**: Add salience scoring to `src/agent/compressor/` as a new stage. Use turn scores to decide which messages to keep verbatim vs. summarize during compaction.
+
+#### 3. Context Packs (`analysis/context_pack.rs`)
+
+Structured context bundles assembled from:
+- Memory blocks (editable key-value entries with labels, security flags, project scoping)
+- Top sessions (ranked by salience)
+- Recent memories (probe queries + LLM responses)
+
+Output is a single redacted text block with character limit enforcement.
+
+**IronClaw relevance**: More sophisticated than IronClaw's current "read identity files + daily logs" system prompt building. Could enhance system prompt assembly with ranked session summaries and structured memory blocks.
+
+**Recommended integration**: Medium priority — consider for Phase 7 system prompt enhancements.
+
+#### 4. Cross-Machine Session Merge
+
+Event deduplication via `event_id` (UUID) + content fingerprinting. Safe to re-run (`merge-log` is idempotent).
+
+**IronClaw relevance**: Directly relevant for Frack↔Frick. Currently agents share PostgreSQL but not session histories. Content-fingerprint dedup would enable session sharing without duplicates.
+
+**Recommended integration**: IronClaw uses PostgreSQL (not JSONL), so this would be a `UNIQUE(content_hash)` constraint on session entries with `INSERT ... ON CONFLICT DO NOTHING`.
+
+### What to Skip
+
+- **Core daemon / scrapers**: IronClaw doesn't scrape external AI tools — it IS the AI tool
+- **Dashboard**: IronClaw has its own web gateway
+- **Memex CLI**: Per-repo `.context/` management is a different paradigm from IronClaw's PostgreSQL workspace
+- **PII redaction**: IronClaw already has `safety/leak_detector.rs`
+
+### Assessment
+
+| Aspect | Verdict |
+|--------|---------|
+| Redundant with IronClaw? | Partially (PII redaction, session save). But learnings, salience, context packs are novel |
+| Integration effort | Medium — learnings + salience are cleanly abstracted Rust modules |
+| Value-add | High — learnings system fills a genuine gap in agent self-improvement |
+| Risk | None — reference patterns only, no new dependencies |
+
+**Priority**: Phase 6b
+
+---
+
+---
+
+## 8. ccpm — Claude Code Project Management (Reference Only)
+
+**Repo**: [automazeio/ccpm](https://github.com/automazeio/ccpm) | **Dir**: `examples/reference-repos/ccpm/`
+
+Shell-based project management system using GitHub Issues + Git worktrees for parallel agent execution. 40+ slash commands, PRD→Epic→Task workflow, specialized agents.
+
+### Key Novel Pattern: Work Stream Analysis
+
+Analyzes a single task to identify parallelizable sub-streams (DB, API, UI, tests) before execution. Each stream gets explicit file patterns, dependencies, and conflict zones. This is a planning heuristic, not infrastructure.
+
+**Adopted as**: `skills/work-stream-analysis/SKILL.md`
+
+### What Overlaps (IronClaw is stronger)
+
+| CCPM Feature | IronClaw Equivalent |
+|---|---|
+| Task management (markdown frontmatter) | PostgreSQL DAG with memory decay |
+| Parallel execution (git worktrees) | Async scheduler + container isolation |
+| Context management (file-based) | Workspace + hybrid search + Logseq |
+| PRD/epic templates | `skills/prd-generator`, `skills/task-breakdown` |
+| Progress tracking (files + GitHub) | Event-sourced action records |
+
+### What Was NOT Adopted
+
+- **GitHub Issues as primary database** — breaks local-only principle; IronClaw's PostgreSQL is stronger
+- **Bidirectional GitHub sync** — adds external dependency; a one-way export skill is a future option
+- **Shell script architecture** — IronClaw is Rust-native with type safety
+- **Git worktrees for isolation** — IronClaw uses container-based isolation
+
+### Assessment
+
+| Aspect | Verdict |
+|--------|---------|
+| Redundant with IronClaw? | Mostly — task graph, parallel execution, context management all covered |
+| Integration effort | Low — only the work-stream-analysis planning pattern was novel |
+| Value-add | Low-Medium — planning heuristic is useful, infrastructure is redundant |
+| Risk | None — reference only |
+
+**Priority**: Reference only. Work stream analysis skill adopted.
+
+---
+
+*Plan updated 2026-02-17. 26 reference repos assessed. ccpm added as reference for work-stream analysis pattern.*

@@ -113,10 +113,17 @@ src/
 │   ├── policy.rs       # PolicyRule system with severity/actions
 │   └── leak_detector.rs # Secret detection (API keys, tokens, etc.)
 │
-├── llm/                # LLM integration (NEAR AI only)
+├── llm/                # LLM integration (6 backends + intelligent router)
 │   ├── provider.rs     # LlmProvider trait, message types
-│   ├── nearai.rs       # NEAR AI chat-api implementation
+│   ├── mod.rs          # Provider factory (create_llm_provider)
+│   ├── nearai.rs       # NEAR AI chat-api (Responses API)
+│   ├── nearai_chat.rs  # NEAR AI Chat Completions API
+│   ├── rig_adapter.rs  # rig-core adapter for OpenAI/Anthropic/Gemini/Ollama
+│   ├── failover.rs     # Multi-provider failover with retryable error classification
+│   ├── router.rs       # Intelligent LLM router (15-dim classifier, 4 profiles, 24 models)
+│   ├── costs.rs        # Per-model cost lookup table
 │   ├── reasoning.rs    # Planning, tool selection, evaluation
+│   ├── retry.rs        # Retry logic with backoff
 │   └── session.rs      # Session token management with auto-renewal
 │
 ├── tools/              # Extensible tool system
@@ -813,6 +820,13 @@ Ported from [OpenClaw](https://github.com/openclaw/openclaw) (TypeScript) to Rus
 | Pre-compaction memory flush | `src/agent/agent_loop.rs` | Silent LLM turn before compaction to persist durable notes |
 | MEMORY.md main-session only | `src/agent/agent_loop.rs` | MEMORY.md excluded from group chats for privacy |
 | Logseq integration | `src/workspace/logseq.rs` | Reads user profile, preferences, decisions from Logseq graph |
+| BOOT.md on startup | `src/agent/agent_loop.rs` | Runs BOOT.md as first agent turn with full tool access on startup |
+| Memory flush with tools | `src/agent/agent_loop.rs` | Pre-compaction flush now executes memory tools (max 3 iterations) |
+| Daily session reset | `src/agent/agent_loop.rs` | Auto-resets sessions at configurable hour boundary |
+| Learnings system | `src/workspace/learnings.rs` | Evidence-backed rules with confidence scoring and lifecycle |
+| Learning tools | `src/tools/builtin/learning.rs` | learning_create, learning_search, learning_promote |
+| Salience scoring | `src/agent/compressor/salience.rs` | Turn/session importance scoring for intelligent compaction |
+| Content-hash dedup | `src/workspace/mod.rs`, `repository.rs` | Cross-machine session merge deduplication |
 | AGENTS.md template | `docs/reference/AGENTS.recommended.md` | Recommended workspace instructions template |
 
 ### Multi-Agent Task Graph
@@ -822,8 +836,8 @@ Inspired by [beads](https://github.com/steveyegge/beads). PostgreSQL DAG for tas
 | File | Purpose |
 |------|---------|
 | `migrations/V9__agent_tasks.sql` | Schema: `agent_tasks`, `agent_task_deps`, `agent_task_events` tables |
-| `src/workspace/tasks.rs` | `TaskRepository` with CRUD, cycle detection, auto-promotion |
-| `src/tools/builtin/task.rs` | 5 LLM tools: `task_create`, `task_list`, `task_update`, `task_ready`, `task_export` |
+| `src/workspace/tasks.rs` | `TaskRepository` with CRUD, cycle detection, auto-promotion, **memory decay** (`archive_completed_tasks`) |
+| `src/tools/builtin/task.rs` | 6 LLM tools: `task_create`, `task_list`, `task_update`, `task_ready`, `task_export`, **`task_archive`** |
 
 ### Semantic Merge
 
@@ -832,6 +846,7 @@ Uses vendored [weave-core](https://github.com/Ataraxy-Labs/weave) for entity-lev
 | File | Purpose |
 |------|---------|
 | `src/workspace/merge.rs` | `semantic_merge`, `merge_prefer_ours`, `merge_with_markers` |
+| `src/workspace/mod.rs` | **`write_with_merge()`** — auto-merge on concurrent workspace writes |
 | `vendor/weave-core/` | Vendored (upstream pins sem-core 0.2, we need 0.3) |
 
 ### Sandboxed Python
@@ -840,19 +855,33 @@ Uses [monty](https://github.com/pydantic/monty) (Rust-native Python interpreter)
 
 | File | Purpose |
 |------|---------|
-| `src/tools/builtin/python.rs` | `PythonTool` — time/memory limited, no I/O |
+| `src/tools/builtin/python.rs` | `PythonTool` — time/memory limited, no I/O, **external function bridge** (json_parse, json_dump, base64_encode, base64_decode, hash_sha256) |
 
 ### Security Hardening
 
 | File | Purpose |
 |------|---------|
-| `src/safety/command_guard.rs` | Destructive command blocking for shell tool |
-| `src/safety/integrity.rs` | Workspace identity file SHA-256 drift detection |
+| `src/safety/command_guard.rs` | Destructive command blocking — **20 security packs** (git, filesystem, database, containers, cloud, system, piped exec, inline scripts, sensitive paths, storage, secrets, remote, CI/CD, networking, DNS, backup, messaging, search, package managers, env vars) |
+| `src/safety/integrity.rs` | Workspace identity file SHA-256 drift detection, **wired into heartbeat** |
 | `src/tools/wasm/verification.rs` | WASM tool checksum verification on load |
+
+### Token Compression
+
+Ported from [claw-compactor](https://github.com/aeromomo/claw-compactor) — 5-stage deterministic compression pipeline.
+
+| File | Purpose |
+|------|---------|
+| `src/agent/compressor/mod.rs` | `CompressorPipeline` with config, token estimation |
+| `src/agent/compressor/observations.rs` | **Observation extraction** — highest-savings layer (~97%) |
+| `src/agent/compressor/dedup.rs` | Shingle hashing + Jaccard similarity dedup |
+| `src/agent/compressor/dictionary.rs` | Auto-learned codebook with `$XX` codes |
+| `src/agent/compressor/patterns.rs` | Path shorthand, IP compression, enum compaction |
+| `src/agent/compressor/text_optimizer.rs` | CJK normalization, whitespace, table compaction |
+| `src/agent/compaction.rs` | **Wired**: compressor runs before LLM summarization |
 
 ### Agent Skills
 
-57 bundled skills in `skills/` at repo root. Auto-discovered from exe dir, ancestor dirs, or CWD.
+97 bundled skills in `skills/` at repo root. Auto-discovered from exe dir, ancestor dirs, or CWD. Sourced from 24 reference repos.
 
 | File | Purpose |
 |------|---------|
@@ -876,6 +905,84 @@ Uses [monty](https://github.com/pydantic/monty) (Rust-native Python interpreter)
 | `AGENT_ID` | lowercase `AGENT_NAME` | Unique ID for multi-agent scoping (e.g., `frack`, `frick`) |
 | `IRONCLAW_SKILLS_DIR` | (auto-detected) | Override bundled skills directory |
 
+### LLM Provider Configuration
+
+IronClaw supports 6 LLM backends. Set `LLM_BACKEND` env var or `llm_backend` in settings.
+
+| Backend | `LLM_BACKEND` value | Required env vars | Default model |
+|---------|---------------------|-------------------|---------------|
+| NEAR AI (default) | `nearai` | `NEARAI_SESSION_TOKEN` or `NEARAI_API_KEY` | `llama4-maverick-instruct-basic` |
+| Ollama (local) | `ollama` | None | `qwen3-coder:30b` |
+| OpenAI | `openai` | `OPENAI_API_KEY` | `gpt-5.3-codex` |
+| Anthropic | `anthropic` | `ANTHROPIC_API_KEY` | `claude-sonnet-4-20250514` |
+| Gemini | `gemini` | `GEMINI_API_KEY` | `gemini-2.5-pro` |
+| OpenAI-compatible | `openai_compatible` | `LLM_BASE_URL` | `default` |
+
+**Ollama-specific vars:**
+- `OLLAMA_BASE_URL` — default `http://localhost:11434` (Frack: local, Frick: `http://alef:11434`)
+- `OLLAMA_MODEL` — default `qwen3-coder:30b`
+
+**Recommended setup for self-hosted:**
+```bash
+# Frack (MacBook) — use local Ollama
+export LLM_BACKEND=ollama
+export OLLAMA_MODEL=qwen3-coder:30b
+
+# Frick (homelab) — use Ollama on alef
+export LLM_BACKEND=ollama
+export OLLAMA_BASE_URL=http://localhost:11434
+export OLLAMA_MODEL=qwen3-coder:30b
+
+# Cloud fallback (any agent)
+export ANTHROPIC_API_KEY=sk-ant-...   # Claude Opus 4.6
+export OPENAI_API_KEY=sk-...          # ChatGPT 5.3
+export GEMINI_API_KEY=...             # Gemini 2.5 Pro
+```
+
+API keys from the encrypted secrets store are auto-injected via `inject_llm_keys_from_secrets()`.
+
+### Intelligent LLM Router
+
+IronClaw includes a native intelligent routing engine (`src/llm/router.rs`) ported from ClawRouter. It classifies requests by complexity and routes to the optimal model for cost/quality balance — all in <1ms with no external API calls.
+
+**15-dimension weighted scoring:**
+Token count, code presence, reasoning markers, technical terms, creative markers, simple indicators, multi-step patterns, question complexity, imperative verbs, constraints, output format, references, negation, domain specificity, agentic task detection.
+
+**4 complexity tiers:** SIMPLE → MEDIUM → COMPLEX → REASONING
+
+**4 routing profiles:**
+| Profile | `ROUTING_PROFILE` | Behavior |
+|---------|-------------------|----------|
+| Auto (default) | `auto` | Standard routing with automatic agentic detection |
+| Eco | `eco` | Ultra cost-optimized: cheapest viable models |
+| Premium | `premium` | Best quality: Claude Opus 4.6, GPT-5.2 Codex |
+| Free | `free` | Zero-cost models only (NVIDIA GPT-OSS 120B) |
+
+**Configuration:**
+```bash
+export ROUTING_PROFILE=auto          # auto, eco, premium, free
+export ROUTING_FORCE_AGENTIC=false   # force agentic tier selection
+export ROUTING_SESSION_PINNING=true  # reuse model within a session
+```
+
+Or in `settings.json`:
+```json
+{
+  "routing_profile": "auto",
+  "routing_force_agentic": false,
+  "routing_session_pinning": true
+}
+```
+
+**Key features:**
+- Session pinning: first request in a session determines the model; subsequent requests reuse it
+- Rate-limit cooldown: models that return 429 are deprioritized for 60 seconds
+- Agentic detection: tool-heavy requests (file ops, deploy, iterate) auto-upgrade to agentic tiers
+- Cost estimation: every routing decision includes estimated cost and savings vs Claude Opus 4.5 baseline
+- **Local-first**: Simple/Medium requests route to local Ollama models (qwen3-coder:30b, deepseek-r1:70b); Complex/Reasoning fall back to Claude Opus 4.6
+- 22-model catalog across 8 providers (OpenAI, Anthropic, Google, DeepSeek, Moonshot, xAI, NVIDIA, Ollama)
+- **Note**: GPT-4o, GPT-4.1, o4-mini were retired by OpenAI on 2026-02-13; GPT-5.3-Codex is the current SOTA coding model
+
 ### Deployment Topology
 
 | Agent | Host | Role |
@@ -883,15 +990,29 @@ Uses [monty](https://github.com/pydantic/monty) (Rust-native Python interpreter)
 | Frack | MacBook | Primary interactive agent (CLI/TUI, web gateway) |
 | Frick | Homelab server (`alef`) | Production/infrastructure agent (shared PostgreSQL, K3s, Ollama) |
 
-Both share PostgreSQL on `alef` and Logseq (synced natively).
+Both share PostgreSQL on `alef` and Logseq (synced natively). Both run Ollama bare metal for local inference.
 
 ### Roadmap
 
-Full plan: [`docs/INTEGRATION_PLAN.md`](docs/INTEGRATION_PLAN.md).
+Full plan: [`docs/INTEGRATION_PLAN.md`](docs/INTEGRATION_PLAN.md). Remaining gaps: [`docs/REMAINING_INTEGRATION_WORK.md`](docs/REMAINING_INTEGRATION_WORK.md).
 
-- **Phase 1 (Security)**: Done — command guard, integrity, WASM verification
-- **Phase 2 (Compaction)**: Partial — `src/agent/compressor/` has dedup, dictionary, patterns
-- **Phase 3 (OpenClaw gaps)**: BOOT.md, memory flush with tools, daily session reset
-- **Phase 4 (Skills)**: Done — 57 bundled skills, multi-source discovery
-- **Phase 5 (Advanced)**: Done — weave-core, monty, task graph
-- **Phase 6+**: Frick deployment, multi-agent shared workspace, enhanced Logseq sync
+- **Phase 1 (Security)**: ✅ Done — command guard (20 packs), integrity (heartbeat-wired), WASM verification
+- **Phase 2 (Compaction)**: ✅ Done — 5-stage pipeline (observations, dedup, dictionary, patterns, text opt) + salience scoring, wired into compaction
+- **Phase 3 (OpenClaw gaps)**: ✅ Done — BOOT.md on startup, memory flush with tool execution loop (max 3 iterations), daily session reset
+- **Phase 4 (Skills)**: ✅ Done — 97 bundled skills from 25 reference repos, multi-source discovery
+- **Phase 4b (Router)**: ✅ Done — Intelligent LLM router (15-dimension classifier, 4 profiles, 22-model catalog, local-first routing, Opus 4.6 cloud fallback)
+- **Phase 5 (Advanced)**: ✅ Done — weave-core + auto-merge, monty + external functions, task graph + memory decay
+- **Phase 5.5 (LLM Providers)**: ✅ Done — Gemini backend added, Ollama default updated to qwen3-coder:30b, 6 total backends
+- **Phase 6 (Database MCP)**: [genai-toolbox](https://github.com/googleapis/genai-toolbox) MCP Toolbox for Databases — structured DB tools via MCP for PostgreSQL + future data sources
+- **Phase 6b (Session Intelligence)**: ✅ Done — learnings system (PostgreSQL + 3 LLM tools + prompt injection), salience scoring (turn/session importance), cross-machine session merge (content-hash dedup)
+- **Phase 7+**: Frick deployment, multi-agent shared workspace, enhanced Logseq sync
+
+### Reference Repo Integration Process
+
+To add a new reference repository:
+
+1. `git clone --depth 1 <url> examples/reference-repos/<short-name>`
+2. Assess: read skills, source, README — what's novel vs already covered?
+3. Adopt: copy skills to `skills/`, port algorithms to Rust, or document patterns
+4. Document: update `docs/INTEGRATION_PLAN.md`, `FEATURE_PARITY.md`, `CLAUDE.md`, `README.md`
+5. Do not add as Cargo dependency — vendor or port instead

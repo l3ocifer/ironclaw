@@ -356,10 +356,10 @@ async fn main() -> anyhow::Result<()> {
         .with(WebLogLayer::new(Arc::clone(&log_broadcaster)))
         .init();
 
-    // Create CLI channel
+    // Create CLI channel (skip in headless mode — no TTY means stdin EOF triggers shutdown)
     let repl_channel = if let Some(ref msg) = cli.message {
         Some(ReplChannel::with_message(msg.clone()))
-    } else if config.channels.cli.enabled {
+    } else if config.channels.cli.enabled && std::io::IsTerminal::is_terminal(&std::io::stdin()) {
         let repl = ReplChannel::new();
         // Suppress the one-liner banner; boot screen will be shown instead.
         repl.suppress_banner();
